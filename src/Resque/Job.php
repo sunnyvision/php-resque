@@ -250,7 +250,7 @@ class Job
         }
 
         $this->redis->sadd(Queue::redisKey(), $this->queue);
-        $status = $this->redis->rpush(Queue::redisKey($this->queue), $this->payload);
+        $status = $this->redis->lpush(Queue::redisKey($this->queue), $this->payload);
 
         if ($status < 1) {
             return false;
@@ -419,6 +419,7 @@ class Job
         $this->setStatus(Job::STATUS_COMPLETE);
 
         $this->redis->zadd(Queue::redisKey($this->queue, 'processed'), time(), $this->payload);
+        $this->redis->lrem('processing_list', 1, $this->payload);
         Stats::incr('processed', 1);
         Stats::incr('processed', 1, Queue::redisKey($this->queue, 'stats'));
 

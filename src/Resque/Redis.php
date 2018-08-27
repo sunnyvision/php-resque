@@ -179,7 +179,8 @@ class Redis
         // sinter
         // smove
         // rename
-        // rpoplpush
+        'rpoplpush',
+        'brpoplpush',
         // mget
         // msetnx
         // mset
