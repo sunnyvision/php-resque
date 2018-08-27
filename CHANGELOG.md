@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+## [2.2.0] - 2018-08-27
+- Using brpoplpush upon poping task, using lpush instead of rpush in enqueueing and using lrem upon completion of a task. (Does not include tests)
+
 ## [2.1.2] - 2017-09-19
 - Fix job processing of the last queue (Issue [#61](https://github.com/mjphaynes/php-resque/issues/61))
 
