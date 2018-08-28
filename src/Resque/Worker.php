@@ -323,6 +323,9 @@ class Worker
                     if ($this->job->getStatus() == Job::STATUS_FAILED) {
                         $this->log('Job '.$job.' failed: "'.$job->failError().'" in '.$this->job->execTimeStr(), Logger::ERROR);
                     } else {
+                        if(empty($exitStatus)) {
+                            $exitStatus = 255;
+                        }
                         $this->log('Job '.$job.' exited with code '.$exitStatus, Logger::ERROR);
                         $this->job->fail(new Exception\Dirty($exitStatus));
                     }
