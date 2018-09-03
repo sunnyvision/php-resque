@@ -126,9 +126,10 @@ class Queue
      * @param  bool      $blocking Should Redis use blocking
      * @return Job|false
      */
-    public function pop(array $queues, $timeout = 10, $blocking = true)
+    public function pop(array $queues, $timeout = 10, $blocking = true, $worker = null)
     {
         $queue = $payload = null;
+
 
         foreach ($queues as $key => $queue) {
             $queues[$key] = self::redisKey($queue);
@@ -136,13 +137,23 @@ class Queue
 
         if ($blocking) {
             foreach ($queues as $queue) {
-                if ($payload = $this->redis->brpoplpush($queue, $this->redis->addNamespace('processing_list'), $timeout)) {
+
+                if($worker != null)
+                    $processingListName = $this->redis->addNamespace($queue . ":" . $worker->getId() . ":processing_list");
+                else 
+                    $processingListName = $this->redis->addNamespace($queue . ":processing_list");
+                
+                if ($payload = $this->redis->brpoplpush($queue, $processingListName, $timeout)) {
                     break;
                 }
             }
         } else {
             foreach ($queues as $queue) {
-                if ($payload = $this->redis->rpoplpush($queue, $this->redis->addNamespace('processing_list'))) {
+                if($worker != null)
+                    $processingListName = $this->redis->addNamespace($queue . ":" . $worker->getId() . ":processing_list");
+                else 
+                    $processingListName = $this->redis->addNamespace($queue . ":processing_list");
+                if ($payload = $this->redis->rpoplpush($queue, $processingListName)) {
                     break;
                 }
             }

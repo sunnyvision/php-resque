@@ -274,7 +274,7 @@ class Worker
                 $this->updateProcLine('Worker: waiting for job on '.implode(',', $this->queues).' with interval '.$this->interval_string());
             }
 
-            $job = \Resque::pop($this->resolveQueues(), $this->interval, $this->blocking);
+            $job = \Resque::pop($this->resolveQueues(), $this->interval, $this->blocking, $this);
 
             if (!$job instanceof Job) {
                 if (!$this->blocking) {
@@ -538,7 +538,10 @@ class Worker
             // However if the shutdown was due to an error, for instance the job hitting the
             // max execution time, then catch the error and fail the job
             if (($error = error_get_last()) and in_array($error['type'], $this->shutdownErrors)) {
-                $this->job->fail(new \ErrorException($error['message'], $error['type'], 0, $error['file'], $error['line']));
+                $extendedOutput = "Exception";
+                if(method_exists($this->job->getInstance(), 'output'))
+                    $extendedOutput = $this->job->getInstance()->output();
+                $this->job->fail(new \ErrorException($error['message'], $error['type'], 0, $error['file'], $error['line']), $extendedOutput . 'x');
             }
 
             return;

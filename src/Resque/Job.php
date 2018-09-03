@@ -340,10 +340,16 @@ class Job
             $retval = false;
         }
 
+
+
         $output = ob_get_contents();
 
         while (ob_get_length()) {
             ob_end_clean();
+        }
+
+        if (method_exists($instance, 'output')) {
+            $output .= $instance->output();
         }
 
         $this->redis->hset(self::redisKey($this), 'output', $output);
@@ -419,7 +425,7 @@ class Job
         $this->setStatus(Job::STATUS_COMPLETE);
 
         $this->redis->zadd(Queue::redisKey($this->queue, 'processed'), time(), $this->payload);
-        $this->redis->lrem('processing_list', 1, $this->payload);
+        $this->redis->lrem(Queue::redisKey($this->queue . ':' . $this->worker->getId() . ':' . $this->worker->getPid(), 'processing_list'), 1, $this->payload);
         Stats::incr('processed', 1);
         Stats::incr('processed', 1, Queue::redisKey($this->queue, 'stats'));
 
@@ -436,6 +442,7 @@ class Job
         $this->setStatus(Job::STATUS_CANCELLED);
 
         $this->redis->zadd(Queue::redisKey($this->queue, 'cancelled'), time(), $this->payload);
+        $this->redis->lrem(Queue::redisKey($this->queue . ':' . $this->worker->getId(), 'processing_list'), 1, $this->payload);
         Stats::incr('cancelled', 1);
         Stats::incr('cancelled', 1, Queue::redisKey($this->queue, 'stats'));
 
@@ -447,11 +454,15 @@ class Job
      *
      * @param \Exception $e
      */
-    public function fail(\Exception $e)
+    public function fail(\Exception $e, $output = null)
     {
         $this->stopped();
 
         $this->setStatus(Job::STATUS_FAILED, $e);
+
+        if($output != null) {
+             $this->redis->hset(self::redisKey($this), 'output', $output);
+        }
 
         // For the failed jobs we store a lot more data for debugging
         $packet = $this->getPacket();
