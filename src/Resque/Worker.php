@@ -198,6 +198,58 @@ class Worker
         Event::fire(Event::WORKER_INSTANCE, $this);
     }
 
+    public function handleRemoteSignal() {
+        $globalData = $this->redis->hget("global", "signal");
+        if(!empty($globalData)) {
+            $lastGSignal = $this->redis->hget(self::redisKey($this), 'last_g_signal');
+            if($lastGSignal != $globalData) {
+                $signalData = $globalData;
+                $this->redis->hset(self::redisKey($this), 'last_g_signal', $globalData);
+            }
+        }
+        if(empty($signalData)) {
+            $signalData = $this->redis->hget(self::redisKey($this), 'signal');
+            $this->redis->hdel(self::redisKey($this), 'signal');
+        }
+        if($signalData) {
+            $this->log('Remote signal: <pop>'.$signalData.'</pop>', Logger::INFO);
+        } else {
+            return;
+        }
+        if($signalData) {
+            switch(strtoupper($signalData)) {
+                case "FORCESHUTDOWN":
+                case "SIGTERM":
+                case "SIGINT":
+                    $this->sigForceShutdown();
+                break;
+                case "QUIT":
+                case "SHUTDOWN":
+                case "SIGQUIT":
+                    $this->sigShutdown();
+                break;
+                case "CANCEL":
+                case "SIGUSR1":
+                    $this->sigCancelJob();
+                break;
+                case "PAUSE":
+                case "SIGUSR2":
+                    $this->sigPause();
+                break;
+                case "RESUME":
+                case "SIGCONT":
+                    $this->sigResume();
+                break;
+                case "SIGPIPE":
+                    $this->sigWakeUp();
+                break;
+                default:
+                $this->log('Unhandled <pop>'.$signalData.'</pop>', Logger::INFO);
+                break;
+            }
+        };
+    }
+
     /**
      * Generate a string representation of this worker.
      *
@@ -225,6 +277,9 @@ class Worker
             ($this->blocking ? 'timeout blocking' : 'time interval').' <pop>'.$this->interval_string().'</pop>', Logger::INFO);
 
         while (true) {
+
+            $this->handleRemoteSignal();
+
             if ($this->memoryExceeded()) {
                 $this->log('Worker memory has been exceeded, aborting', Logger::CRITICAL);
                 $this->shutdown();
@@ -268,7 +323,7 @@ class Worker
             $this->queueDelayed();
 
             if ($this->blocking) {
-                $this->log('Pop blocking with timeout of '.$this->interval_string(), Logger::DEBUG);
+                $this->log('[' . $this->getId() . '] Pop blocking with timeout of '.$this->interval_string(), Logger::DEBUG);
                 $this->updateProcLine('Worker: waiting for job on '.implode(',', $this->queues).' with blocking timeout '.$this->interval_string());
             } else {
                 $this->updateProcLine('Worker: waiting for job on '.implode(',', $this->queues).' with interval '.$this->interval_string());
@@ -317,7 +372,11 @@ class Worker
                 $this->redis->hset(self::redisKey($this), 'job_pid', $this->child);
 
                 // Wait until the child process finishes before continuing
-                pcntl_wait($status);
+                while(pcntl_wait($status, WNOHANG) === 0) {
+                    sleep($this->getInterval());
+                    $this->handleRemoteSignal();
+                    $this->log('Keep alive...', Logger::DEBUG);
+                }
 
                 if (!pcntl_wifexited($status) or ($exitStatus = pcntl_wexitstatus($status)) !== 0) {
                     if ($this->job->getStatus() == Job::STATUS_FAILED) {
@@ -639,7 +698,9 @@ class Worker
     {
         $this->log('SIGPIPE received; attempting to wake up', Logger::DEBUG);
         // $this->redis->establishConnection();
-
+        if(!$this->redis->isConnected()) {
+            $this->redis->connect();
+        }
         Event::fire(Event::WORKER_WAKEUP, $this);
     }
 
