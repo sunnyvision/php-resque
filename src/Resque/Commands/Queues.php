@@ -46,7 +46,7 @@ class Queues extends Command
         }
 
         $table = new Resque\Helpers\Table($this);
-        $table->setHeaders(array('#', 'Name', 'Queued', 'Delayed', 'Processed', 'Failed', 'Cancelled', 'Total'));
+        $table->setHeaders(array('#', 'Name', 'Queued', 'Running', 'Delayed', 'Processed', 'Failed', 'Cancelled', 'Total'));
 
         foreach ($queues as $i => $queue) {
             $stats = Resque\Redis::instance()->hgetall(Resque\Queue::redisKey($queue, 'stats'));
@@ -54,6 +54,7 @@ class Queues extends Command
             $table->addRow(array(
                 $i + 1, $queue,
                 (int)@$stats['queued'],
+                (int)@$stats['running'],
                 (int)@$stats['delayed'],
                 (int)@$stats['processed'],
                 (int)@$stats['failed'],
