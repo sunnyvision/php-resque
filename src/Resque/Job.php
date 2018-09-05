@@ -425,7 +425,7 @@ class Job
         $this->setStatus(Job::STATUS_COMPLETE);
 
         $this->redis->zadd(Queue::redisKey($this->queue, 'processed'), time(), $this->payload);
-        $this->redis->lrem(Queue::redisKey($this->queue . ':' . $this->worker->getId() . ':' . $this->worker->getPid(), 'processing_list'), 1, $this->payload);
+        $this->redis->lrem(Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 1, $this->payload);
         Stats::incr('processed', 1);
         Stats::incr('processed', 1, Queue::redisKey($this->queue, 'stats'));
 
@@ -442,7 +442,7 @@ class Job
         $this->setStatus(Job::STATUS_CANCELLED);
 
         $this->redis->zadd(Queue::redisKey($this->queue, 'cancelled'), time(), $this->payload);
-        $this->redis->lrem(Queue::redisKey($this->queue . ':' . $this->worker->getId(), 'processing_list'), 1, $this->payload);
+        $this->redis->lrem(Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 1, $this->payload);
         Stats::incr('cancelled', 1);
         Stats::incr('cancelled', 1, Queue::redisKey($this->queue, 'stats'));
 

@@ -221,27 +221,27 @@ class Worker
                 case "FORCESHUTDOWN":
                 case "SIGTERM":
                 case "SIGINT":
-                    $this->sigForceShutdown();
+                    posix_kill(getmypid(), SIGKILL);
                 break;
                 case "QUIT":
                 case "SHUTDOWN":
                 case "SIGQUIT":
-                    $this->sigShutdown();
+                    posix_kill(getmypid(), SIGQUIT);
                 break;
                 case "CANCEL":
-                case "SIGUSR1":
-                    $this->sigCancelJob();
+                case "SIGUSR1": 
+                    posix_kill(getmypid(), SIGUSR1);
                 break;
                 case "PAUSE":
                 case "SIGUSR2":
-                    $this->sigPause();
+                    posix_kill(getmypid(), SIGUSR2);
                 break;
                 case "RESUME":
                 case "SIGCONT":
-                    $this->sigResume();
+                    posix_kill(getmypid(), SIGCONT);
                 break;
                 case "SIGPIPE":
-                    $this->sigWakeUp();
+                    posix_kill(getmypid(), SIGPIPE);
                 break;
                 default:
                 $this->log('Unhandled <pop>'.$signalData.'</pop>', Logger::INFO);
@@ -340,6 +340,8 @@ class Worker
                 continue;
             }
 
+            $time = time();
+
             $this->log('Found a job <pop>'.$job.'</pop>', Logger::NOTICE);
 
             $this->workingOn($job);
@@ -375,7 +377,7 @@ class Worker
                 while(pcntl_wait($status, WNOHANG) === 0) {
                     sleep($this->getInterval());
                     $this->handleRemoteSignal();
-                    $this->log('Keep alive...', Logger::DEBUG);
+                    $this->log('Job in progress (' . (time() - $time) . 's)', Logger::DEBUG);
                 }
 
                 if (!pcntl_wifexited($status) or ($exitStatus = pcntl_wexitstatus($status)) !== 0) {
@@ -393,6 +395,7 @@ class Worker
                 // Reset the redis connection to prevent forking issues
                 $this->redis->disconnect();
                 $this->redis->connect();
+                $this->redis->client("setname", "job:" . $job->getId());
 
                 Event::fire(Event::WORKER_FORK_CHILD, array($this, $job, getmypid()));
 
@@ -458,6 +461,8 @@ class Worker
         if ($cleaned['processed']) {
             $this->log('Cleared <pop>'.$cleaned['processed'].'</pop> processed job'.($cleaned['processed'] == 1 ? '' : 's'), Logger::NOTICE);
         }
+
+        $this->cleanupQueue();
 
         $this->setStatus(self::STATUS_RUNNING);
 
@@ -543,6 +548,7 @@ class Worker
     {
         $this->log('Registering worker <pop>'.$this.'</pop>', Logger::NOTICE);
 
+        $this->redis->client("setname", "worker:" . $this->id);
         $this->redis->sadd(self::redisKey(), $this->id);
         $this->redis->hmset(self::redisKey($this), array(
             'started'      => microtime(true),
@@ -590,24 +596,26 @@ class Worker
     /**
      * Unregister this worker in Redis
      */
-    public function unregister()
+    public function unregister($force = false)
     {
-        if ($this->child === 0) {
+        if(!$force) {
+            if ($this->child === 0) {
             // This is a child process so don't unregister worker
             // However if the shutdown was due to an error, for instance the job hitting the
             // max execution time, then catch the error and fail the job
-            if (($error = error_get_last()) and in_array($error['type'], $this->shutdownErrors)) {
-                $extendedOutput = "Exception";
-                if(method_exists($this->job->getInstance(), 'output'))
-                    $extendedOutput = $this->job->getInstance()->output();
-                $this->job->fail(new \ErrorException($error['message'], $error['type'], 0, $error['file'], $error['line']), $extendedOutput . 'x');
-            }
+                if (($error = error_get_last()) and in_array($error['type'], $this->shutdownErrors)) {
+                    $extendedOutput = "Exception";
+                    if(method_exists($this->job->getInstance(), 'output'))
+                        $extendedOutput = $this->job->getInstance()->output();
+                    $this->job->fail(new \ErrorException($error['message'], $error['type'], 0, $error['file'], $error['line']), $extendedOutput . 'x');
+                }
 
-            return;
-        } elseif (!is_null($this->child)) {
+                return;
+            } elseif (!is_null($this->child)) {
             // There is a child process running
-            $this->log('There is a child process pid:'.$this->child.' running, killing it', Logger::DEBUG);
-            $this->killChild();
+                $this->log('There is a child process pid:'.$this->child.' running, killing it', Logger::DEBUG);
+                $this->killChild();
+            }
         }
 
         if (is_object($this->job)) {
@@ -618,6 +626,7 @@ class Worker
         $this->log('Unregistering worker <pop>'.$this.'</pop>', Logger::NOTICE);
 
         $this->redis->srem(self::redisKey(), $this->id);
+        $this->cleanupQueue();
         $this->redis->expire(self::redisKey($this), \Resque::getConfig('default.expiry_time', \Resque::DEFAULT_EXPIRY_TIME));
 
         $this->host->finished($this);
@@ -880,7 +889,7 @@ class Worker
 
             $this->log('Pruning dead worker: '.$worker, Logger::DEBUG);
 
-            $worker->unregister();
+            $worker->unregister(true);
             $cleaned[] = (string)$worker;
         }
 
@@ -1352,5 +1361,19 @@ class Worker
     protected function interval_string()
     {
         return $this->interval.' second'.($this->interval == 1 ? '' : 's');
+    }
+
+
+    public function cleanupQueue() {
+
+        $queues = $this->redis->smembers(Queue::redisKey());
+
+        foreach($queues as $queue) {
+            $this->log('Cleaning up zombie queue <pop>'.$queue.'</pop>', Logger::NOTICE);
+            while($this->redis->rpoplpush("queue:{$queue}:{$this->id}:processing_list", $this->redis->addNamespace("queue:{$queue}"))) {
+
+            }
+            $this->redis->del("queue:{$queue}:{$this->id}:processing_list");
+        }
     }
 }
