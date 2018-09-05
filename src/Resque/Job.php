@@ -347,9 +347,10 @@ class Job
         while (ob_get_length()) {
             ob_end_clean();
         }
-
-        if (method_exists($instance, 'output')) {
-            $output .= $instance->output();
+        if(!empty($instance)) {
+            if (method_exists($instance, 'output')) {
+                $output .= $instance->output();
+            }
         }
 
         $this->redis->hset(self::redisKey($this), 'output', $output);

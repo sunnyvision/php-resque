@@ -46,6 +46,11 @@ class Worker
     );
 
     /**
+     * Host timeout cleanup cycle
+     */
+    const CLEANUP_CYCLE = 120;
+
+    /**
      * The Redis instance.
      *
      * @var Redis
@@ -276,7 +281,15 @@ class Worker
         $this->log('Listening to queues: <pop>'.implode(', ', $this->queues).'</pop>, with '.
             ($this->blocking ? 'timeout blocking' : 'time interval').' <pop>'.$this->interval_string().'</pop>', Logger::INFO);
 
+        $lastResetTime = time();
+
         while (true) {
+
+            if((time() - $lastResetTime) >= self::CLEANUP_CYCLE) {
+                $lastResetTime = time();
+                $this->host->cleanup();
+                $this->cleanup();
+            }
 
             $this->handleRemoteSignal();
 
@@ -377,7 +390,8 @@ class Worker
                 while(pcntl_wait($status, WNOHANG) === 0) {
                     sleep($this->getInterval());
                     $this->handleRemoteSignal();
-                    $this->log('Job in progress (' . (time() - $time) . 's)', Logger::DEBUG);
+                    $this->host->working($this);
+                    $this->log('[' . $this->getId() . '] Host keep alive and child still up (' . (time() - $time) . 's)', Logger::DEBUG);
                 }
 
                 if (!pcntl_wifexited($status) or ($exitStatus = pcntl_wexitstatus($status)) !== 0) {
@@ -522,6 +536,7 @@ class Worker
         }
 
         if ($this->child === 0) {
+            $this->job->cancel();
             throw new Exception\Shutdown('Job forced shutdown');
         }
 
@@ -530,7 +545,7 @@ class Worker
         if (posix_kill($this->child, 0)) {
             $this->log('Killing child process at pid:'.$this->child, Logger::DEBUG);
 
-            posix_kill($this->child, SIGTERM);
+            posix_kill($this->child, SIGKILL);
         }
 
         $this->child = null;
