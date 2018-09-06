@@ -387,11 +387,17 @@ class Worker
                 $this->redis->hset(self::redisKey($this), 'job_pid', $this->child);
 
                 // Wait until the child process finishes before continuing
+                $i = 0;
+                // pcntl_wait($status);
                 while(pcntl_wait($status, WNOHANG) === 0) {
-                    sleep($this->getInterval());
-                    $this->handleRemoteSignal();
-                    $this->host->working($this);
-                    $this->log('[' . $this->getId() . '] Host keep alive and child still up (' . (time() - $time) . 's)', Logger::DEBUG);
+                    usleep(1000);
+                    $i++;
+                    if($i%15000 == 0) {
+                        $i = 0;
+                        $this->handleRemoteSignal();
+                        $this->host->working($this);
+                        $this->log('[' . $this->getId() . '] Host keep alive and child still up (' . (time() - $time) . 's)', Logger::DEBUG);
+                    }
                 }
 
                 if (!pcntl_wifexited($status) or ($exitStatus = pcntl_wexitstatus($status)) !== 0) {
