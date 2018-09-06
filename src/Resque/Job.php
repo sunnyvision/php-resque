@@ -474,9 +474,34 @@ class Job
             'output'    => $packet['output'],
             'exception' => (array)json_decode($packet['exception'], true),
         ));
-        $this->redis->zadd(Queue::redisKey($this->queue, 'failed'), time(), json_encode($failed_payload));
-        Stats::incr('failed', 1);
-        Stats::incr('failed', 1, Queue::redisKey($this->queue, 'stats'));
+        if(empty($packet['failed_count'] )) {
+            $packet['failed_count'] = 0;
+        }
+        $packet['failed_count'] += 1;
+        $this->redis->hmset(self::redisKey($this), ['failed_count' => $packet['failed_count']]);
+        $instance = $this->getInstance();
+        $shouldRequeue = $packet['failed_count'] <= 5;
+        if (method_exists($instance, 'shouldRequeue')) {
+            $shouldRequeue = $instance->shouldRequeue($packet['failed_count']);
+        }
+        if($shouldRequeue) {
+            $this->redis->rpoplpush(
+                Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 
+                $this->redis->addNamespace(Queue::redisKey($this->queue))
+            );
+            Stats::incr('queued', 1);
+            Stats::incr('queued', 1, Queue::redisKey($this->queue, 'stats'));
+            Stats::incr('retried', 1);
+            Stats::incr('retried', 1, Queue::redisKey($this->queue, 'stats'));
+        } else {
+            $this->redis->rpoplpush(
+                Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 
+                $this->redis->addNamespace(Queue::redisKey($this->queue) . ':failed_list')
+            );
+            $this->redis->zadd(Queue::redisKey($this->queue, 'failed'), time(), json_encode($failed_payload));
+            Stats::incr('failed', 1);
+            Stats::incr('failed', 1, Queue::redisKey($this->queue, 'stats'));
+        }
 
         Event::fire(Event::JOB_FAILURE, array($this, $e));
     }
