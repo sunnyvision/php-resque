@@ -637,11 +637,11 @@ class Worker
                 $this->log('There is a child process pid:'.$this->child.' running, killing it', Logger::DEBUG);
                 $this->killChild();
             }
-        }
 
-        if (is_object($this->job)) {
-            $this->job->fail(new Exception\Cancel);
-            $this->log('Failing running job <pop>'.$this->job.'</pop>', Logger::NOTICE);
+            if (is_object($this->job)) {
+                $this->job->fail(new Exception\Dirty);
+                $this->log('Failing running job <pop>'.$this->job.'</pop>', Logger::NOTICE);
+            }
         }
 
         $this->log('Unregistering worker <pop>'.$this.'</pop>', Logger::NOTICE);

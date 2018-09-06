@@ -459,15 +459,17 @@ class Job
     {
         $this->stopped();
 
-        $this->setStatus(Job::STATUS_FAILED, $e);
-
         if($output != null) {
              $this->redis->hset(self::redisKey($this), 'output', $output);
         }
 
         // For the failed jobs we store a lot more data for debugging
         $packet = $this->getPacket();
+
+        $this->setStatus(Job::STATUS_FAILED, $e);
+
         $failed_payload = array_merge(json_decode($this->payload, true), array(
+            'status'    => Job::STATUS_FAILED,
             'worker'    => $packet['worker'],
             'started'   => $packet['started'],
             'finished'  => $packet['finished'],
@@ -484,20 +486,30 @@ class Job
         if (method_exists($instance, 'shouldRequeue')) {
             $shouldRequeue = $instance->shouldRequeue($packet['failed_count']);
         }
-        if($shouldRequeue) {
-            $this->redis->rpoplpush(
-                Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 
-                $this->redis->addNamespace(Queue::redisKey($this->queue))
-            );
+
+        $remoteCancelled = (isset($packet['override_status']) && $packet['override_status'] == Job::STATUS_CANCELLED);
+
+        if($shouldRequeue && !$remoteCancelled) {
+            if($this->worker) {
+                $this->redis->rpoplpush(
+                    Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 
+                    $this->redis->addNamespace(Queue::redisKey($this->queue))
+                );
+            }
             Stats::incr('queued', 1);
             Stats::incr('queued', 1, Queue::redisKey($this->queue, 'stats'));
             Stats::incr('retried', 1);
             Stats::incr('retried', 1, Queue::redisKey($this->queue, 'stats'));
+        } else if ($remoteCancelled) {
+            $this->run();
+            $this->cancel();
         } else {
-            $this->redis->rpoplpush(
-                Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 
-                $this->redis->addNamespace(Queue::redisKey($this->queue) . ':failed_list')
-            );
+            if($this->worker) {
+                $this->redis->rpoplpush(
+                    Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 
+                    $this->redis->addNamespace(Queue::redisKey($this->queue) . ':failed_list')
+                );
+            }
             $this->redis->zadd(Queue::redisKey($this->queue, 'failed'), time(), json_encode($failed_payload));
             Stats::incr('failed', 1);
             Stats::incr('failed', 1, Queue::redisKey($this->queue, 'stats'));
