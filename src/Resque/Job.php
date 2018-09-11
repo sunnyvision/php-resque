@@ -335,6 +335,10 @@ class Job
             // setUp said don't perform this job
             $this->cancel();
             $retval = false;
+        } catch (Exception\Retry $e) {
+            // retry this job again
+            $this->fail($e, $e->getMessage(), true);
+            $retval = false;
         } catch (\Exception $e) {
             $this->fail($e);
             $retval = false;
@@ -455,7 +459,7 @@ class Job
      *
      * @param \Exception $e
      */
-    public function fail(\Exception $e, $output = null)
+    public function fail(\Exception $e, $output = null, $mustRequeue = false)
     {
         $this->stopped();
 
@@ -476,20 +480,26 @@ class Job
             'output'    => $packet['output'],
             'exception' => (array)json_decode($packet['exception'], true),
         ));
+
         if(empty($packet['failed_count'] )) {
             $packet['failed_count'] = 0;
         }
-        $packet['failed_count'] += 1;
-        $this->redis->hmset(self::redisKey($this), ['failed_count' => $packet['failed_count']]);
+
         $instance = $this->getInstance();
-        $shouldRequeue = $packet['failed_count'] <= 5;
+        $shouldRequeue = $packet['failed_count'] < 5;
         if (method_exists($instance, 'shouldRequeue')) {
             $shouldRequeue = $instance->shouldRequeue($packet['failed_count']);
         }
 
+        $packet['failed_count'] += 1;
+
+        if(!$mustRequeue) {
+            $this->redis->hmset(self::redisKey($this), ['failed_count' => $packet['failed_count']]);
+        }
+
         $remoteCancelled = (isset($packet['override_status']) && $packet['override_status'] == Job::STATUS_CANCELLED);
 
-        if($shouldRequeue && !$remoteCancelled) {
+        if(($shouldRequeue && !$remoteCancelled) || ( $mustRequeue && !$remoteCancelled )) {
             if($this->worker) {
                 $this->redis->rpoplpush(
                     Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 

@@ -459,6 +459,9 @@ class Worker
             case Job::STATUS_FAILED:
                 $this->log('Job '.$job.' failed: "'.$job->failError().'" in '.$job->execTimeStr(), Logger::ERROR);
                 break;
+            case Job::STATUS_WAITING:
+                $this->log('Job '.$job.' requeued explicitly.', Logger::INFO);
+                break;
             default:
                 $this->log('Unknown job status "('.gettype($status).')'.$status.'" for <pop>'.$job.'</pop>', Logger::WARNING);
                 break;
