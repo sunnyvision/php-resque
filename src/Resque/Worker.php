@@ -1395,7 +1395,8 @@ class Worker
         foreach($queues as $queue) {
             $this->log('Cleaning up zombie queue <pop>'.$queue.'</pop>', Logger::NOTICE);
             while($this->redis->rpoplpush("queue:{$queue}:{$this->id}:processing_list", $this->redis->addNamespace("queue:{$queue}"))) {
-
+                $this->redis->hincrby("stats", "running", -1);
+                $this->redis->hincrby("stats", "queued", 1);
             }
             $this->redis->del("queue:{$queue}:{$this->id}:processing_list");
         }

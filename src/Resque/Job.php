@@ -448,6 +448,7 @@ class Job
 
         $this->redis->zadd(Queue::redisKey($this->queue, 'cancelled'), time(), $this->payload);
         $this->redis->lrem(Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 1, $this->payload);
+        
         Stats::incr('cancelled', 1);
         Stats::incr('cancelled', 1, Queue::redisKey($this->queue, 'stats'));
 
