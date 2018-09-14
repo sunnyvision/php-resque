@@ -143,8 +143,8 @@ class Job
     public static function createId($queue, $class, $data = null, $run_at = 0)
     {
         $id = dechex(crc32($queue)).
-            dechex(microtime(true) * 1000).
-            md5(json_encode($class).json_encode($data).$run_at.uniqid('', true));
+        dechex(microtime(true) * 1000).
+        md5(json_encode($class).json_encode($data).$run_at.uniqid('', true));
 
         return substr($id, 0, self::ID_LENGTH);
     }
@@ -243,11 +243,34 @@ class Job
      *
      * @return bool success
      */
-    public function queue()
+    public function queue($validate = true)
     {
+        $currentStatus = $this->getStatus();
+
+        if($currentStatus == self::STATUS_WAITING) {
+            return false;
+        }
+        if($currentStatus == self::STATUS_RUNNING) {
+            return false;
+        }
+        if($currentStatus == self::STATUS_COMPLETE) {
+            return false;
+        }
+
         if (Event::fire(Event::JOB_QUEUE, $this) === false) {
             return false;
         }
+
+        if(!$this->ensureUniqueness()) return false;
+
+        if($validate && method_exists($this->class, 'onQueue')) {
+            $instance = $this->getInstance();
+            if(!$instance->onQueue($this)) {
+                return false;
+            }
+        }
+
+
 
         $this->redis->sadd(Queue::redisKey(), $this->queue);
         $status = $this->redis->lpush(Queue::redisKey($this->queue), $this->payload);
@@ -258,13 +281,44 @@ class Job
 
         $this->setStatus(self::STATUS_WAITING);
 
+        if($currentStatus == self::STATUS_CANCELLED) {
+            $this->redis->zrem(Queue::redisKey($this->queue, 'cancelled'), $this->payload);
+        } else if ($currentStatus == self::STATUS_FAILED) {
+            $this->redis->zrem(Queue::redisKey($this->queue, 'failed'), $this->payload);
+        } else if ($currentStatus == self::STATUS_COMPLETE) {
+            $this->redis->zrem(Queue::redisKey($this->queue, 'processed'), $this->payload);
+        }
+
         Stats::incr('queued', 1);
         Stats::incr('queued', 1, Queue::redisKey($this->queue, 'stats'));
-
         Event::fire(Event::JOB_QUEUED, $this);
 
         return true;
     }
+
+    public function ensureUniqueness() {
+
+        if(method_exists($this->class, 'signature')) {
+            $instance = $this->getInstance();
+            $unique = $instance->signature($this->getData());
+            if($this->redis->hsetnx("unique", $unique, $this->getId()) === 1) {
+                // great, this is the only job
+            } else {
+                // some same tag exist, check if the job is completed, if so rewrite it,
+                // otherwise do not queue.
+                $lastId = $this->redis->hget("unique", $unique);
+                $job = \Resque::job($lastId);
+                if($job && $job->getStatus() !== self::STATUS_COMPLETE) {
+                    $this->redis->lpush("duplicates", $this->payload);
+                    $this->redis->ltrim("duplicates", 0, 299);
+                    return false;
+                } else {
+                    $this->redis->hset("unique", $unique, $this->getId());
+                }
+            }
+        }
+        return true;
+    }   
 
     /**
      * Save the job to Redis delayed queue
@@ -277,6 +331,16 @@ class Job
         if (Event::fire(Event::JOB_DELAY, array($this, $time)) === false) {
             return false;
         }
+
+        if(!$this->ensureUniqueness()) return false;
+
+        if(method_exists($this->class, 'onQueue')) {
+            $instance = $this->getInstance();
+            if(!$instance->onQueue($this)) {
+                return false;
+            }
+        }
+
 
         $this->redis->sadd(Queue::redisKey(), $this->queue);
         $status = $this->redis->zadd(Queue::redisKey($this->queue, 'delayed'), $time, $this->payload);
@@ -306,6 +370,17 @@ class Job
         Stats::decr('queued', 1);
         Stats::decr('queued', 1, Queue::redisKey($this->queue, 'stats'));
 
+        $packet = $this->getPacket();
+        $overrideCancel = (
+            isset($packet['override_status']) && 
+            $packet['override_status'] == Job::STATUS_CANCELLED
+        );
+
+        if($overrideCancel) {
+            $this->cancel();
+            return false;
+        }
+
         if (Event::fire(Event::JOB_PERFORM, $this) === false) {
             $this->cancel();
             return false;
@@ -321,7 +396,7 @@ class Job
             ob_start();
 
             if (method_exists($instance, 'setUp')) {
-                $instance->setUp();
+                $instance->setUp($this->data);
             }
 
             call_user_func_array(array($instance, $this->method), array($this->data, $this));
@@ -333,7 +408,7 @@ class Job
             $this->complete();
         } catch (Exception\Cancel $e) {
             // setUp said don't perform this job
-            $this->cancel();
+            $this->cancel($e);
             $retval = false;
         } catch (Exception\Retry $e) {
             // retry this job again
@@ -440,11 +515,11 @@ class Job
     /**
      * Mark the current job as cancelled
      */
-    public function cancel()
+    public function cancel(\Exception $e = null)
     {
         $this->stopped();
 
-        $this->setStatus(Job::STATUS_CANCELLED);
+        $this->setStatus(Job::STATUS_CANCELLED, $e);
 
         $this->redis->zadd(Queue::redisKey($this->queue, 'cancelled'), time(), $this->payload);
         $this->redis->lrem(Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 1, $this->payload);
@@ -465,69 +540,72 @@ class Job
         $this->stopped();
 
         if($output != null) {
-             $this->redis->hset(self::redisKey($this), 'output', $output);
-        }
+         $this->redis->hset(self::redisKey($this), 'output', $output);
+     }
 
         // For the failed jobs we store a lot more data for debugging
-        $packet = $this->getPacket();
+     $packet = $this->getPacket();
 
-        $this->setStatus(Job::STATUS_FAILED, $e);
+     $this->setStatus(Job::STATUS_FAILED, $e);
 
-        $failed_payload = array_merge(json_decode($this->payload, true), array(
-            'status'    => Job::STATUS_FAILED,
-            'worker'    => $packet['worker'],
-            'started'   => $packet['started'],
-            'finished'  => $packet['finished'],
-            'output'    => $packet['output'],
-            'exception' => (array)json_decode($packet['exception'], true),
-        ));
+     $failed_payload = array_merge(json_decode($this->payload, true), array(
+        'status'    => Job::STATUS_FAILED,
+        'worker'    => $packet['worker'],
+        'started'   => $packet['started'],
+        'finished'  => $packet['finished'],
+        'output'    => $packet['output'],
+        'exception' => (array)json_decode($packet['exception'], true),
+    ));
 
-        if(empty($packet['failed_count'] )) {
-            $packet['failed_count'] = 0;
-        }
+     if(empty($packet['failed_count'] )) {
+        $packet['failed_count'] = 0;
+    }
 
-        $instance = $this->getInstance();
-        $shouldRequeue = $packet['failed_count'] < 5;
-        if (method_exists($instance, 'shouldRequeue')) {
-            $shouldRequeue = $instance->shouldRequeue($packet['failed_count']);
-        }
+    $shouldRequeue = $packet['failed_count'] < 5;
+    
+    $packet['failed_count'] += 1;
 
-        $packet['failed_count'] += 1;
+    if(!$mustRequeue) {
+        $this->redis->hmset(self::redisKey($this), ['failed_count' => $packet['failed_count']]);
+    }
 
-        if(!$mustRequeue) {
-            $this->redis->hmset(self::redisKey($this), ['failed_count' => $packet['failed_count']]);
-        }
+    $remoteCancelled = (isset($packet['override_status']) && $packet['override_status'] == Job::STATUS_CANCELLED);
 
-        $remoteCancelled = (isset($packet['override_status']) && $packet['override_status'] == Job::STATUS_CANCELLED);
-
-        if(($shouldRequeue && !$remoteCancelled) || ( $mustRequeue && !$remoteCancelled )) {
-            if($this->worker) {
+    if(($shouldRequeue && !$remoteCancelled) || ( $mustRequeue && !$remoteCancelled )) {
+        if($this->worker) {
+            if($e instanceof Exception\Retry) {
+                $delay = $e->getCode();
+                if ($delay < 94608000) {
+                    $delay += time();
+                }
+                $this->delay($delay);
+                $this->redis->lrem(Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 1, $this->payload);
+            } else {
+                /**
+                 * Directly pushing back to original queue
+                 */
                 $this->redis->rpoplpush(
                     Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 
                     $this->redis->addNamespace(Queue::redisKey($this->queue))
                 );
+                Stats::incr('queued', 1);
+                Stats::incr('queued', 1, Queue::redisKey($this->queue, 'stats'));
             }
-            Stats::incr('queued', 1);
-            Stats::incr('queued', 1, Queue::redisKey($this->queue, 'stats'));
-            Stats::incr('retried', 1);
-            Stats::incr('retried', 1, Queue::redisKey($this->queue, 'stats'));
-        } else if ($remoteCancelled) {
-            $this->run();
-            $this->cancel();
-        } else {
-            if($this->worker) {
-                $this->redis->rpoplpush(
-                    Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 
-                    $this->redis->addNamespace(Queue::redisKey($this->queue) . ':failed_list')
-                );
-            }
-            $this->redis->zadd(Queue::redisKey($this->queue, 'failed'), time(), json_encode($failed_payload));
-            Stats::incr('failed', 1);
-            Stats::incr('failed', 1, Queue::redisKey($this->queue, 'stats'));
         }
-
-        Event::fire(Event::JOB_FAILURE, array($this, $e));
+        Stats::incr('retried', 1);
+        Stats::incr('retried', 1, Queue::redisKey($this->queue, 'stats'));
+    } else if ($remoteCancelled) {
+        $this->run();
+        $this->cancel();
+    } else {
+        $this->redis->lrem(Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 1, $this->payload);
+        $this->redis->zadd(Queue::redisKey($this->queue, 'failed'), time(), json_encode($failed_payload));
+        Stats::incr('failed', 1);
+        Stats::incr('failed', 1, Queue::redisKey($this->queue, 'stats'));
     }
+
+    Event::fire(Event::JOB_FAILURE, array($this, $e));
+}
 
     /**
      * Returns the fail error for the job

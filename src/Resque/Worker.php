@@ -410,6 +410,11 @@ class Worker
                         $this->log('Job '.$job.' exited with code '.$exitStatus, Logger::ERROR);
                         $this->job->fail(new Exception\Dirty($exitStatus));
                     }
+                } else {
+                    if (($this->job->toArray()['worker'] === $this->getId()) && $this->job->getStatus() == Job::STATUS_RUNNING) {
+                        $this->log('Job '.$job.' abnormally exited with code '.$exitStatus, Logger::ERROR);
+                        $this->job->fail(new Exception\Dirty($exitStatus));
+                    }
                 }
             } else {
                 // Reset the redis connection to prevent forking issues
@@ -461,6 +466,9 @@ class Worker
                 break;
             case Job::STATUS_WAITING:
                 $this->log('Job '.$job.' requeued explicitly.', Logger::INFO);
+                break;
+            case Job::STATUS_DELAYED:
+                $this->log('Job '.$job.' requeued with delay.', Logger::INFO);
                 break;
             default:
                 $this->log('Unknown job status "('.gettype($status).')'.$status.'" for <pop>'.$job.'</pop>', Logger::WARNING);
@@ -873,7 +881,7 @@ class Worker
                     $job->setWorker($this);
 
                     if (Event::fire(Event::JOB_QUEUE_DELAYED, $job) !== false) {
-                        $job->queue();
+                        $job->queue(false);
 
                         Event::fire(Event::JOB_QUEUED_DELAYED, $job);
                     }
