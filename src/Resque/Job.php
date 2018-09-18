@@ -299,6 +299,7 @@ class Job
     public function ensureUniqueness() {
 
         if(method_exists($this->class, 'signature')) {
+
             $instance = $this->getInstance();
             $unique = $instance->signature($this->getData());
             if($this->redis->hsetnx("unique", $unique, $this->getId()) === 1) {
@@ -308,7 +309,12 @@ class Job
                 // otherwise do not queue.
                 $lastId = $this->redis->hget("unique", $unique);
                 $job = \Resque::job($lastId);
-                if($job && $job->getStatus() !== self::STATUS_COMPLETE) {
+                if($lastId == $this->getId()) return true;
+                if($job &&  !in_array($job->getStatus(), [
+                    self::STATUS_COMPLETE, 
+                    self::STATUS_CANCELLED, 
+                    // self::STATUS_FAILED
+                ])) {
                     $this->redis->lpush("duplicates", $this->payload);
                     $this->redis->ltrim("duplicates", 0, 299);
                     return false;
