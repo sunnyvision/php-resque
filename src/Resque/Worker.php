@@ -389,6 +389,7 @@ class Worker
                 // Wait until the child process finishes before continuing
                 $i = 0;
                 // pcntl_wait($status);
+                $this->handleRemoteSignal();
                 while(pcntl_wait($status, WNOHANG) === 0) {
                     usleep(1000);
                     $i++;

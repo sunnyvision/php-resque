@@ -261,7 +261,7 @@ class Job
             return false;
         }
 
-        if(!$this->ensureUniqueness()) return false;
+        if($validate && !$this->ensureUniqueness()) return false;
 
         if($validate && method_exists($this->class, 'onQueue')) {
             $instance = $this->getInstance();
@@ -302,12 +302,13 @@ class Job
 
             $instance = $this->getInstance();
             $unique = $instance->signature($this->getData());
-            if($this->redis->hsetnx("unique", $unique, $this->getId()) === 1) {
+            $unique = "unique:job:" . $unique;
+            if($this->redis->set($unique, $this->getId(), "NX", "EX", 86400) === 1) {
                 // great, this is the only job
             } else {
                 // some same tag exist, check if the job is completed, if so rewrite it,
                 // otherwise do not queue.
-                $lastId = $this->redis->hget("unique", $unique);
+                $lastId = $this->redis->get($unique);
                 $job = \Resque::job($lastId);
                 if($lastId == $this->getId()) return true;
                 if($job &&  !in_array($job->getStatus(), [
@@ -319,7 +320,7 @@ class Job
                     $this->redis->ltrim("duplicates", 0, 299);
                     return false;
                 } else {
-                    $this->redis->hset("unique", $unique, $this->getId());
+                    $this->redis->set($unique, $this->getId(), "EX", 86400);
                 }
             }
         }
@@ -516,6 +517,15 @@ class Job
         Stats::incr('processed', 1, Queue::redisKey($this->queue, 'stats'));
 
         Event::fire(Event::JOB_COMPLETE, $this);
+    }
+
+
+    public function signalCancel($reason = "N/A")
+    {
+        $this->redis->hmset(self::redisKey($this), [
+            'override_status' => Job::STATUS_CANCELLED,
+            'override_reason' => $reason,
+        ]);
     }
 
     /**
