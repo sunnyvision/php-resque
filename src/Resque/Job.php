@@ -31,6 +31,11 @@ class Job
     const STATUS_FAILED    = 6;
 
     /**
+     * How many times should normal exception be retried
+     */
+    const RETRY_THRESHOLD = 3;
+
+    /**
      * Job ID length
      */
     const ID_LENGTH = 22;
@@ -311,11 +316,7 @@ class Job
                 $lastId = $this->redis->get($unique);
                 $job = \Resque::job($lastId);
                 if($lastId == $this->getId()) return true;
-                if($job &&  !in_array($job->getStatus(), [
-                    self::STATUS_COMPLETE, 
-                    self::STATUS_CANCELLED, 
-                    // self::STATUS_FAILED
-                ])) {
+                if($job &&  !in_array($job->getStatus(), self::$completeStatuses)) {
                     $this->redis->lpush("duplicates", $this->payload);
                     $this->redis->ltrim("duplicates", 0, 299);
                     return false;
@@ -415,13 +416,16 @@ class Job
             $this->complete();
         } catch (Exception\Cancel $e) {
             // setUp said don't perform this job
+            $this->worker && $this->worker->log("[Job cancel] [{$this->getId()}] " . $e->getMessage(), Logger::NOTICE);
             $this->cancel($e);
             $retval = false;
         } catch (Exception\Retry $e) {
             // retry this job again
+            $this->worker && $this->worker->log("[Job retry] [{$this->getId()}] " . $e->getMessage(), Logger::NOTICE);
             $this->fail($e, $e->getMessage(), true);
             $retval = false;
         } catch (\Exception $e) {
+            $this->worker && $this->worker->log("[Job exception] [{$this->getId()}] " . $e->getMessage(), Logger::NOTICE);
             $this->fail($e);
             $retval = false;
         }
@@ -477,6 +481,20 @@ class Job
     }
 
     /**
+     * Report the current progress to the redis job hash map
+     *
+     * @return boolean
+     * @author 
+     **/
+    public function reportProgress($percent, $latestLine = "")
+    {
+        return $this->redis->hmset(self::redisKey($this), [
+            'progress' => $percent,
+            'latest_line' => $latestLine,
+        ]);
+    }
+
+    /**
      * Mark the current job running
      */
     public function run()
@@ -519,6 +537,20 @@ class Job
         Event::fire(Event::JOB_COMPLETE, $this);
     }
 
+    public function setSeries($series)
+    {
+        $this->redis->hmset(self::redisKey($this), [
+            'series_id' => $series,
+        ]);
+    }
+
+    public function clearSignal()
+    {
+        $this->redis->hdel(self::redisKey($this), [
+            'override_status',
+            'override_reason',
+        ]);
+    }
 
     public function signalCancel($reason = "N/A")
     {
@@ -577,7 +609,7 @@ class Job
         $packet['failed_count'] = 0;
     }
 
-    $shouldRequeue = $packet['failed_count'] < 5;
+    $shouldRequeue = $packet['failed_count'] < self::RETRY_THRESHOLD;
     
     $packet['failed_count'] += 1;
 
@@ -695,6 +727,7 @@ class Job
 
         if (in_array($status, self::$completeStatuses)) {
             $packet['finished'] = microtime(true);
+            if($status == Job::STATUS_COMPLETE) $packet['progress'] = 100;
         }
 
         if ($e) {
@@ -711,6 +744,21 @@ class Job
         if (in_array($status, self::$completeStatuses)) {
             $this->redis->expire(self::redisKey($this), \Resque::getConfig('default.expiry_time', \Resque::DEFAULT_EXPIRY_TIME));
         }
+    }
+
+
+    /**
+     * Fetch the packet for the job being monitored.
+     *
+     * @return array
+     */
+    public function getPacketFields($fields)
+    {
+        if ($packet = $this->redis->hmget(self::redisKey($this), $fields)) {
+            return $packet;
+        }
+
+        return false;
     }
 
     /**

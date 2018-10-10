@@ -13,6 +13,7 @@ namespace Resque\Logger\Handler\Connector;
 
 use Resque;
 use Monolog\Handler\RedisHandler;
+use Monolog\Logger;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -49,6 +50,6 @@ class RedisConnector extends AbstractConnector
             $key = $namespace.$key;
         }
 
-        return new RedisHandler($redis, $key);
+        return new RedisHandler($redis, $key, Logger::INFO, true, 5000);
     }
 }

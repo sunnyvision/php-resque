@@ -427,7 +427,24 @@ class Worker
 
                 $this->log('Running job <pop>'.$job.'</pop>', Logger::INFO);
                 $this->updateProcLine('Job: processing '.$job->getQueue().'#'.$job->getId().' since '.strftime('%F %T'));
-
+                $packetData = $job->getPacket();
+                if($packetData['payload']) {
+                    $payload = json_decode($packetData['payload'], true)['data'];
+                    if(!empty($payload['series_id'])) {
+                        $seriesId = $payload['series_id'];
+                        $this->redis->multi();
+                        if(is_array($seriesId)) {
+                            foreach($seriesId as $sid) {
+                                $this->redis->zadd("jobseries:{$sid}", time(), $job->getId());
+                                $this->redis->expire("jobseries:{$sid}", 86400);
+                            }
+                        } else {
+                            $this->redis->zadd("jobseries:{$seriesId}", time(), $job->getId());
+                            $this->redis->expire("jobseries:{$seriesId}", 86400);
+                        }
+                        $this->redis->exec();
+                    }
+                }
                 $this->perform($job);
                 exit(0);
             }
@@ -646,7 +663,7 @@ class Worker
                 return;
             } elseif (!is_null($this->child)) {
             // There is a child process running
-                $this->log('There is a child process pid:'.$this->child.' running, killing it', Logger::DEBUG);
+                $this->log('There is a child process pid:'.$this->child.' running, killing it', Logger::INFO);
                 $this->killChild();
             }
 
@@ -691,7 +708,7 @@ class Worker
                 break;
         }
 
-        $this->log($sig.' received; force shutdown worker', Logger::DEBUG);
+        $this->log($sig.' received; force shutdown worker', Logger::INFO);
         $this->forceShutdown();
     }
 
@@ -700,7 +717,7 @@ class Worker
      */
     public function sigShutdown()
     {
-        $this->log('QUIT received; shutdown worker', Logger::DEBUG);
+        $this->log('QUIT received; shutdown worker', Logger::INFO);
         $this->shutdown();
     }
 
@@ -709,7 +726,7 @@ class Worker
      */
     public function sigCancelJob()
     {
-        $this->log('USR1 received; cancel current job', Logger::DEBUG);
+        $this->log('USR1 received; cancel current job', Logger::INFO);
         $this->cancelJob();
     }
 
@@ -718,7 +735,7 @@ class Worker
      */
     public function sigPause()
     {
-        $this->log('USR2 received; pausing job processing', Logger::DEBUG);
+        $this->log('USR2 received; pausing job processing', Logger::INFO);
         $this->setStatus(self::STATUS_PAUSED);
     }
 
@@ -728,7 +745,7 @@ class Worker
      */
     public function sigResume()
     {
-        $this->log('CONT received; resuming job processing', Logger::DEBUG);
+        $this->log('CONT received; resuming job processing', Logger::INFO);
         $this->setStatus(self::STATUS_RUNNING);
     }
 
@@ -738,7 +755,7 @@ class Worker
      */
     public function sigWakeUp()
     {
-        $this->log('SIGPIPE received; attempting to wake up', Logger::DEBUG);
+        $this->log('SIGPIPE received; attempting to wake up', Logger::INFO);
         // $this->redis->establishConnection();
         if(!$this->redis->isConnected()) {
             $this->redis->connect();
