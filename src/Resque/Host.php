@@ -61,7 +61,22 @@ class Host
     public function __construct($hostname = null)
     {
         $this->redis    = Redis::instance();
-        $this->hostname = $hostname ?: gethostname();
+
+        $this->updateHostname($hostname);
+    }
+
+    public function updateHostname($hostname = null) {
+
+        $versionPath = null;
+        if(isset($GLOBALS['system_root'])) {
+            $versionPath = $GLOBALS['system_root'] . '/module/version.txt';
+        }
+        $recursiveHostname = null;
+        if(file_exists($versionPath))
+            $recursiveHostname = file_get_contents($GLOBALS['system_root'] . '/module/version.txt');
+
+        $this->hostname = $hostname ?: ($recursiveHostname?$recursiveHostname."@":"") . gethostname();
+
     }
 
     /**

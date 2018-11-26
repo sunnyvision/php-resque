@@ -57,6 +57,7 @@ class Event
     const JOB_CANCELLED      = 210;
     const JOB_FAILURE        = 211;
     const JOB_DONE           = 212;
+    const JOB_PERFORMING     = 300;
 
     /**
      * @var array containing all registered callbacks, indexed by event name

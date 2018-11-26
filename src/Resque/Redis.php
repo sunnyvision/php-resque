@@ -347,4 +347,16 @@ class Redis
         //     return false;
         // }
     }
+
+
+    /**
+     * Get initialized client
+     *
+     * @return Predis\Client
+     * @author 
+     **/
+    public function getClient()
+    {
+        return $this->redis;
+    }
 }

@@ -123,6 +123,12 @@ class Worker
     protected $memoryLimit = 128;
 
     /**
+     * Dedicated lock, used when maintenance, only dedicated bot can run jobs
+     * @var boolean
+     */
+    protected $dedicatedLock = false;
+
+    /**
      * @var array List of shutdown errors to catch
      */
     protected $shutdownErrors = array(
@@ -139,6 +145,19 @@ class Worker
      * @var Logger logger instance
      */
     protected $logger = null;
+
+    /**
+     * Incapabilities
+     * @var array
+     */
+    protected $incapabilities = array();
+
+    /**
+     * Capabilities
+     *
+     * @var array
+     **/
+    protected $capabilities = array();
 
     /**
      * Get the Redis key
@@ -171,6 +190,10 @@ class Worker
             return false;
         }
 
+        if(!$packet) {
+            return false;
+        }
+
         $worker = new static(explode(',', $packet['queues']), $packet['blocking']);
         $worker->setId($id);
         $worker->setPid($packet['pid']);
@@ -199,11 +222,46 @@ class Worker
         $this->host = new Host();
         $this->pid  = getmypid();
         $this->id   = $this->host.':'.$this->pid;
+        $this->dedicatedLock = false;
 
         Event::fire(Event::WORKER_INSTANCE, $this);
     }
 
+    /**
+     * Set worker to dedicated mode
+     *
+     * @return boolean
+     * @author 
+     **/
+    public function setDedicated()
+    {
+        return $this->redis->hset("global", "dedicated", $this->getId());
+    }
+
     public function handleRemoteSignal() {
+
+        if($this->job) {
+            $packet = $this->job->getPacket();
+            $overrideCancel = (
+                isset($packet['override_status']) && 
+                $packet['override_status'] == Job::STATUS_CANCELLED
+            );
+            if($overrideCancel) {
+                $this->log('Job appears cancelled.', Logger::INFO);
+                $this->cancelJob();
+                $signalData = 'CANCEL';
+            }
+        }
+
+        $dedicated = $this->redis->hget("global", "dedicated");
+        if(!empty($dedicated) && $this->getId() != $dedicated) {
+            $this->dedicatedLock = true;
+            $this->log('Dedicated mode, this worker ' . $this->getId() . ' is not eligible to work currently, sleep for a while. <pop>'.$dedicated.'</pop>', Logger::INFO);
+            $this->sigPause();
+        } else if ($this->dedicatedLock) {
+            $this->sigResume();
+            $this->dedicatedLock = false;
+        }
         $globalData = $this->redis->hget("global", "signal");
         if(!empty($globalData)) {
             $lastGSignal = $this->redis->hget(self::redisKey($this), 'last_g_signal');
@@ -289,6 +347,11 @@ class Worker
                 $lastResetTime = time();
                 $this->host->cleanup();
                 $this->cleanup();
+                $oldHostname = $this->host;
+                $this->host->updateHostname();
+                if($this->host != $oldHostname) {
+                    return $this->shutdown();
+                }
             }
 
             $this->handleRemoteSignal();
@@ -301,7 +364,7 @@ class Worker
             }
 
             if (!$this->redis->sismember(self::redisKey(), $this->id) or $this->redis->hlen(self::redisKey($this)) == 0) {
-                $this->log('Worker is not in list of workers or packet is corrupt, aborting', Logger::CRITICAL);
+                $this->log('Worker ' . $this->id . ' is not in list of workers or packet is corrupt, aborting', Logger::CRITICAL);
                 $this->shutdown();
 
                 Event::fire(Event::WORKER_CORRUPT, $this);
@@ -315,6 +378,8 @@ class Worker
                 break;
             }
 
+            $this->host->working($this);
+
             if ($this->status == self::STATUS_PAUSED) {
                 $this->log('Worker paused, trying again in '.$this->interval_string(), Logger::INFO);
                 $this->updateProcLine('Worker: paused');
@@ -322,8 +387,8 @@ class Worker
                 continue;
             }
 
-            $this->host->working($this);
             $this->redis->hmset(self::redisKey($this), 'memory', memory_get_usage());
+
 
             Event::fire(Event::WORKER_WORK, $this);
 
@@ -336,7 +401,7 @@ class Worker
             $this->queueDelayed();
 
             if ($this->blocking) {
-                $this->log('[' . $this->getId() . '] Pop blocking with timeout of '.$this->interval_string(), Logger::DEBUG);
+                $this->log('[' . $this->getId() . '] Pop blocking with timeout of '.$this->interval_string() . ' q: ' . implode(',', $this->resolveQueues()), Logger::DEBUG);
                 $this->updateProcLine('Worker: waiting for job on '.implode(',', $this->queues).' with blocking timeout '.$this->interval_string());
             } else {
                 $this->updateProcLine('Worker: waiting for job on '.implode(',', $this->queues).' with interval '.$this->interval_string());
@@ -390,14 +455,19 @@ class Worker
                 $i = 0;
                 // pcntl_wait($status);
                 $this->handleRemoteSignal();
+                $pid = $this->child;
+
+                $this->redis->hset(self::redisKey($this), 'job_load', str_replace("\n", "", trim(shell_exec ( "ps -p " . $pid . " -o %cpu,%mem | tail -n +2" ))));
+                $t = microtime(true);
                 while(pcntl_wait($status, WNOHANG) === 0) {
                     usleep(1000);
-                    $i++;
-                    if($i%15000 == 0) {
-                        $i = 0;
+                    if( (microtime(true) - $t) > 5) {
+                        $t = microtime(true);
                         $this->handleRemoteSignal();
+                        $this->redis->hset(self::redisKey($this), 'job_load', str_replace("\n", "", trim(shell_exec ( "ps -p " . $pid . " -o %cpu,%mem | tail -n +2" ))));
+
                         $this->host->working($this);
-                        $this->log('[' . $this->getId() . '] Host keep alive and child still up (' . (time() - $time) . 's)', Logger::DEBUG);
+                        $this->log('(' . $status . ') [' . $this->getId() . '] Host keep alive and child still up (' . (time() - $time) . 's)', Logger::DEBUG);
                     }
                 }
 
@@ -423,6 +493,8 @@ class Worker
                 $this->redis->connect();
                 $this->redis->client("setname", "job:" . $job->getId());
 
+                $this->redis->hset(self::redisKey($this), 'job_desc', (string) $job);
+
                 Event::fire(Event::WORKER_FORK_CHILD, array($this, $job, getmypid()));
 
                 $this->log('Running job <pop>'.$job.'</pop>', Logger::INFO);
@@ -436,11 +508,11 @@ class Worker
                         if(is_array($seriesId)) {
                             foreach($seriesId as $sid) {
                                 $this->redis->zadd("jobseries:{$sid}", time(), $job->getId());
-                                $this->redis->expire("jobseries:{$sid}", 86400);
+                                $this->redis->expire("jobseries:{$sid}", \Resque::DEFAULT_EXPIRY_TIME);
                             }
                         } else {
                             $this->redis->zadd("jobseries:{$seriesId}", time(), $job->getId());
-                            $this->redis->expire("jobseries:{$seriesId}", 86400);
+                            $this->redis->expire("jobseries:{$seriesId}", \Resque::DEFAULT_EXPIRY_TIME);
                         }
                         $this->redis->exec();
                     }
@@ -465,7 +537,7 @@ class Worker
         // and turn off displaying errors as it fills
         // up the console
         set_time_limit($this->timeout);
-        ini_set('display_errors', 0);
+        ini_set('display_errors', 1);
 
         $job->perform();
 
@@ -545,7 +617,7 @@ class Worker
         }
 
         $this->shutdown();
-        $this->killChild();
+        $this->killChild(SIGKILL);
     }
 
     /**
@@ -564,24 +636,21 @@ class Worker
      * Kill a forked child job immediately. The job it is processing will not
      * be completed.
      */
-    public function killChild()
+    public function killChild($signal = SIGUSR1)
     {
         if (is_null($this->child)) {
             return;
         }
 
         if ($this->child === 0) {
+            $this->log('Children is cancelling', Logger::NOTICE);
             $this->job->cancel();
             throw new Exception\Shutdown('Job forced shutdown');
         }
 
         Event::fire(Event::WORKER_KILLCHILD, array($this, $this->child));
-
-        if (posix_kill($this->child, 0)) {
-            $this->log('Killing child process at pid:'.$this->child, Logger::DEBUG);
-
-            posix_kill($this->child, SIGKILL);
-        }
+        $this->log('Killing child process at pid:'.$this->child, Logger::DEBUG);
+        posix_kill($this->child, $signal);
 
         $this->child = null;
     }
@@ -598,9 +667,13 @@ class Worker
     {
         $this->log('Registering worker <pop>'.$this.'</pop>', Logger::NOTICE);
 
+        $this->host->working($this);
         $this->redis->client("setname", "worker:" . $this->id);
         $this->redis->sadd(self::redisKey(), $this->id);
-        $this->redis->hmset(self::redisKey($this), array(
+
+        $previouslyRegistered = $this->redis->hexists(self::redisKey($this), 'started');
+
+        $reg = array(
             'started'      => microtime(true),
             'hostname'     => (string)$this->host,
             'pid'          => getmypid(),
@@ -618,7 +691,22 @@ class Worker
             'job_id'       => '',
             'job_pid'      => 0,
             'job_started'  => 0
-        ));
+        );
+
+        if($previouslyRegistered) {
+            $reg['restarted'] = microtime(true);
+            if(empty($reg['time_slice'])) $reg['time_slice'] = 0;
+            if(empty($reg['count'])) $reg['count'] = 0;
+            if(empty($reg['time_slice_across_restart'])) $reg['time_slice_across_restart'] = 0;
+            if(empty($reg['count_across_restart'])) $reg['count_across_restart'] = 0;
+            $reg['time_slice_across_restart'] += $reg['time_slice'];
+            $reg['time_slice'] = 0;
+            $reg['count_across_restart'] += $reg['count'];
+            $reg['count'] = 0;
+            unset($reg['started']);
+        }
+
+        $this->redis->hmset(self::redisKey($this), $reg);
 
         if (function_exists('pcntl_signal')) {
             $this->log('Registering sig handlers for worker '.$this, Logger::DEBUG);
@@ -655,9 +743,7 @@ class Worker
             // max execution time, then catch the error and fail the job
                 if (($error = error_get_last()) and in_array($error['type'], $this->shutdownErrors)) {
                     $extendedOutput = "Exception";
-                    if(method_exists($this->job->getInstance(), 'output'))
-                        $extendedOutput = $this->job->getInstance()->output();
-                    $this->job->fail(new \ErrorException($error['message'], $error['type'], 0, $error['file'], $error['line']), $extendedOutput . 'x');
+                    $this->job->fail(new \ErrorException($error['message'], $error['type'], 0, $error['file'], $error['line']), "");
                 }
 
                 return;
@@ -789,11 +875,18 @@ class Worker
     {
         Event::fire(Event::WORKER_DONE_WORKING, array($this, $this->job));
 
+
         $this->redis->hmset(self::redisKey($this), array(
             'job_id'      => '',
+            'job_desc'      => '',
+            'job_load'      => '',
             'job_pid'     => 0,
             'job_started' => 0
         ));
+
+
+        $this->redis->hincrbyfloat(self::redisKey($this), 'time_slice', $this->job->execTime());
+        $this->redis->hincrby(self::redisKey($this), 'count', 1);
 
         switch ($this->job->getStatus()) {
             case Job::STATUS_COMPLETE:
@@ -804,6 +897,10 @@ class Worker
                 break;
             case Job::STATUS_FAILED:
                 $this->redis->hincrby(self::redisKey($this), 'failed', 1);
+                break;
+            case Job::STATUS_WAITING:
+            case Job::STATUS_DELAYED:
+                $this->redis->hincrby(self::redisKey($this), 'retried', 1);
                 break;
         }
 
@@ -818,6 +915,13 @@ class Worker
     public function getPacket()
     {
         if ($packet = $this->redis->hgetall(self::redisKey($this))) {
+            if(!empty($packet['time_slice'])) {
+                $packet['utilization'] = ($packet['time_slice'] / ( time() - $packet['started'] ) * 100);
+            }
+            if(!empty($packet['incapabilities'])) {
+                $packet['incapabilities'] = json_decode($packet['incapabilities'], true);
+                $packet['capabilities'] = json_decode($packet['capabilities'], true);
+            }
             return $packet;
         }
 
@@ -873,7 +977,7 @@ class Worker
             $queues = array();
         }
 
-        return $queues;
+        return array_merge($queues, [ $this->getId() ]);
     }
 
     /**
@@ -1381,7 +1485,7 @@ class Worker
      */
     protected function getProcessTitle($status)
     {
-        return sprintf('resque-%s: %s', \Resque::VERSION, $status);
+        return sprintf('%s: %s', gethostname(), $status);
     }
 
     /**
@@ -1426,5 +1530,89 @@ class Worker
             }
             $this->redis->del("queue:{$queue}:{$this->id}:processing_list");
         }
+
+        // $pipeline = $this->redis->pipeline();
+
+        while($item = $this->redis->rpoplpush("queue:{$this->id}", $this->redis->addNamespace("queue:default"))) {
+            //... pushing every item in the dedicated queue back to default queue
+            error_log("$item is repushed");
+        }
+        $this->redis->del("queue:{$this->id}");
+        $this->redis->del("queue:{$this->id}:stats");
+        $this->redis->del("queue:{$this->id}:processed");
+        $this->redis->del("queue:{$this->id}:cancelled");
+        $this->redis->del("queue:{$this->id}:failed");
+        $this->redis->del("queue:{$this->id}:delayed");
+
+        // $pipeline->execute();
+        /**
+         * Removal of dedicated queues stats, optional..
+         */
+
+    }
+
+
+    /**
+     * @return void
+     * @author 
+     **/
+    public function setCapability($capabilities)
+    {
+        $this->capabilities = $capabilities;
+        $this->redis->hset(self::redisKey($this), 'capabilities', json_encode($this->capabilities));
+    }
+
+
+    /**
+     *
+     * @return void
+     * @author 
+     **/
+    public function clearCapabilities()
+    {
+        $this->capabilities = array();
+        $this->redis->hset(self::redisKey($this), 'capabilities', json_encode($this->capabilities));
+    }
+
+
+    /**
+     *
+     * @return void
+     * @author 
+     **/
+    public function clearIncapabilities()
+    {
+        $this->incapabilities = array();
+        $this->redis->hset(self::redisKey($this), 'incapabilities', json_encode($this->incapabilities));
+    }
+
+
+    /**
+     *
+     * @return void
+     * @author 
+     **/
+    public function addIncapability($item)
+    {
+        if(!in_array($item, $this->incapabilities)) {
+            array_push($this->incapabilities, $item);
+        }
+        $this->redis->hset(self::redisKey($this), 'incapabilities', json_encode($this->incapabilities));
+    }
+
+
+    public function getIncapabilities($item)
+    {
+        $this->incapabilities = $this->redis->hget(self::redisKey($this), 'incapabilities');
+        if(empty($this->incapabilities )) {
+            $this->incapabilities  = array();
+        }
+        return $this->incapabilities;
+    }
+
+
+    public function getCapabilities()
+    {
+        return $this->capabilities;
     }
 }
