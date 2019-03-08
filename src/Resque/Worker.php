@@ -457,14 +457,18 @@ class Worker
                 $this->handleRemoteSignal();
                 $pid = $this->child;
 
-                $this->redis->hset(self::redisKey($this), 'job_load', str_replace("\n", "", trim(shell_exec ( "ps -p " . $pid . " -o %cpu,%mem | tail -n +2" ))));
+                if($pid > 0) {
+                    $this->redis->hset(self::redisKey($this), 'job_load', str_replace("\n", "", trim(shell_exec ( "ps -p " . $pid . " -o %cpu,%mem | tail -n +2" ))));
+                }
                 $t = microtime(true);
                 while(pcntl_wait($status, WNOHANG) === 0) {
                     usleep(1000);
                     if( (microtime(true) - $t) > 5) {
                         $t = microtime(true);
                         $this->handleRemoteSignal();
-                        $this->redis->hset(self::redisKey($this), 'job_load', str_replace("\n", "", trim(shell_exec ( "ps -p " . $pid . " -o %cpu,%mem | tail -n +2" ))));
+                        if($pid > 0) {
+                            $this->redis->hset(self::redisKey($this), 'job_load', str_replace("\n", "", trim(shell_exec ( "ps -p " . $pid . " -o %cpu,%mem | tail -n +2" ))));
+                        }
 
                         $this->host->working($this);
                         $this->log('(' . $status . ') [' . $this->getId() . '] Host keep alive and child still up (' . (time() - $time) . 's)', Logger::DEBUG);
@@ -538,6 +542,8 @@ class Worker
         // up the console
         set_time_limit($this->timeout);
         ini_set('display_errors', 1);
+
+        $job->isPerformedOnBot = true;
 
         $job->perform();
 

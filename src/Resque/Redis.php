@@ -171,6 +171,7 @@ class Redis
         'zrevrangebyscore',
         'zcard',
         'zscore',
+        'zcount',
         'zremrangebyscore',
         'sort',
         // sinterstore

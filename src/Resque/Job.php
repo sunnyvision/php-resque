@@ -94,6 +94,8 @@ class Job
         self::STATUS_CANCELLED
     );
 
+    public $isPerformedOnBot = false;
+
     /**
      * Get the Redis key
      *
@@ -395,11 +397,22 @@ class Job
      **/
     public function jobErrorHandler($errno, $errstr, $errfile = NULL, $errline = NULL, $errcontent = NULL)   
     {
-        $this->redis->executeRaw(["xadd", $this->redis->addNamespace(self::redisKey($this, 'output')), 'maxlen', '~', 1000, '*', 'message', $errstr]);
-        error_log($errfile);
-        error_log($errline);
-        error_log($errstr);
+        echo $errfile . ':' . $errline . ' .. ' . $errstr . PHP_EOL;
+        return false;
     }
+
+    /**
+     * Default job fail handler
+     *
+     * @return void
+     * @author 
+     **/
+    public function jobFatalErrorHandler()   
+    {
+      $last_error = error_get_last();
+      $this->jobErrorHandler(E_ERROR, $last_error['message'], $last_error['file'], $last_error['line']);
+    }
+
 
     /**
      * Perform the job
@@ -412,7 +425,7 @@ class Job
         Stats::decr('queued', 1, Queue::redisKey($this->queue, 'stats'));
 
         set_error_handler(array($this, 'jobErrorHandler'));
-
+        register_shutdown_function(array($this, 'jobFatalErrorHandler'));
         $this->streamLog('begin', true);
 
         $packet = $this->getPacket();
@@ -554,12 +567,56 @@ class Job
         return $this->instance = $instance;
     }
 
+    public function getProgress()
+    {
+        $return = $this->redis->hmget(self::redisKey($this), [
+            'status',
+            'progress',
+            'latest_line',
+            'id',
+            'exception',
+            'updated',
+        ]);
+        $map = array(
+            'status' => $return[0],
+            'progress' => $return[1],
+            'latest_line' => $return[2],
+            'id' => $return[3],
+            'exception' => $return[4],
+            'updated' => $return[5],
+        );
+        if(!empty($map['exception'])) {
+            $re = '/(.*) in (.*) on (.*)/m';
+            $str = json_decode($map['exception'], true)['error'];
+            $str = explode("\n", $str);
+            $str = $str[0];
+            if(preg_match_all($re, $str, $matches, PREG_SET_ORDER, 0)) {
+                $map['exception'] = $matches[0][1];
+            }
+            $re = '/(.*) in (.*)/m';
+            if(preg_match_all($re, $str, $matches, PREG_SET_ORDER, 0)) {
+                $map['exception'] = $matches[0][1];
+            }
+        }
+        $map['updated'] = date("H:i:s", $map['updated']);
+        $map['progress'] = intval($map['progress']);
+        $map['status'] = intval($map['status']);
+        if($map['status'] === self::STATUS_COMPLETE) {
+            $map['progress'] = 100;
+        }
+        return $map;
+    }
+
     /**
      * Report the current progress to the redis job hash map
      *
      * @return boolean
      * @author 
      **/
+    public function setProgress($percent, $latestLine = "")
+    {
+        return $this->reportProgress($percent, $latestLine);
+    }
     public function reportProgress($percent, $latestLine = "")
     {
         return $this->redis->hmset(self::redisKey($this), [
@@ -683,8 +740,21 @@ class Job
         $packet['failed_count'] = 0;
     }
 
-    $shouldRequeue = $packet['failed_count'] < self::RETRY_THRESHOLD;
-    
+    $threshold = self::RETRY_THRESHOLD;
+
+    $shouldRequeue = $packet['failed_count'] < $threshold;
+
+    $decodedPayload = json_decode($this->payload, true);
+
+    if(!empty($decodedPayload['data']['retry_threshold'])) {
+        $threshold = intval($decodedPayload['data']['retry_threshold']);
+        $shouldRequeue = $packet['failed_count'] < $threshold;
+        if($threshold === -2) {
+            $shouldRequeue = true;
+            echo "This job has specified retry_threshold = -2, and will never stop retry \n";
+        }
+    }
+
     $packet['failed_count'] += 1;
 
     if(!$mustRequeue) {
@@ -702,7 +772,7 @@ class Job
                 }
                 $this->delay($delay);
                 $this->redis->lrem(Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 1, $this->payload);
-            } else {
+            } else if ($packet['failed_count'] < 2) {
                 /**
                  * Directly pushing back to original queue
                  */
@@ -712,6 +782,20 @@ class Job
                 );
                 Stats::incr('queued', 1);
                 Stats::incr('queued', 1, Queue::redisKey($this->queue, 'stats'));
+                $this->redis->zadd(Queue::redisKey($this->queue, 'fail_retried'), time(), json_encode($failed_payload));
+                $this->setStatus(self::STATUS_WAITING);
+            } else {
+                $fails = intval($packet['failed_count']);
+                if($fails > 32) $fails = 32;
+                $delay = pow(2, $fails);
+                if($delay > 180) {
+                    $delay = 180;
+                }
+                $delay = mt_rand($delay / 2, $delay);
+                echo "Exponential backoff ... " . $delay . 's' . PHP_EOL;
+                $delay += time();
+                $this->delay($delay);
+                $this->redis->lrem(Queue::redisKey($this->queue, $this->worker->getId() . ':processing_list'), 1, $this->payload);
                 $this->redis->zadd(Queue::redisKey($this->queue, 'fail_retried'), time(), json_encode($failed_payload));
             }
         }
@@ -801,6 +885,10 @@ class Job
                 'worker'    => '',
                 'status'    => $status,
                 'created_by'   => json_encode(array_map(function($item) {
+                    if(empty($item['line'])) $item['line'] = 'na';
+                    if(empty($item['file'])) $item['file'] = 'na';
+                    if(empty($item['function'])) $item['function'] = 'na';
+                    if(empty($item['args'])) $item['args'] = [];
                     return array(
                         'origin' => str_replace($GLOBALS['system_root'], "", $item['file']) . ':' . @$item['line'] . ' ' . @$item['function'],
                         'args' => $item['args'],
@@ -846,19 +934,21 @@ class Job
 
             $this->redis->expire(self::redisKey($this), $expiryTime);
 
-            $lastRun = intval($this->redis->hget('jobs:stat:' . $this->getPresentation(), 'recent'));
-            $frequency = intval($this->redis->hget('jobs:stat:' . $this->getPresentation(), 'frequency'));
-            $this->redis->zincrby('jobs:time', $this->execTime(), $status . "::" . $this->getPresentation());
-            $this->redis->zincrby('jobs:count', 1, $status . "::" . $this->getPresentation());
+            if($this->isPerformedOnBot) {
+                $lastRun = intval($this->redis->hget('jobs:stat:' . $this->getPresentation(), 'recent'));
+                $frequency = intval($this->redis->hget('jobs:stat:' . $this->getPresentation(), 'frequency'));
+                $this->redis->zincrby('jobs:time', $this->execTime(), $status . "::" . $this->getPresentation());
+                $this->redis->zincrby('jobs:count', 1, $status . "::" . $this->getPresentation());
 
-            $stat = [
-                'class_name' => $this->getClass(),
-                'recent' => time(),
-                'frequency' => ($lastRun > 0) ? ((time() - $lastRun + ( $frequency > 1 ? $frequency : 1)) / 2) : 1,
+                $stat = [
+                    'class_name' => $this->getClass(),
+                    'recent' => time(),
+                    'frequency' => ($lastRun > 0) ? ((time() - $lastRun + ( $frequency > 1 ? $frequency : 1)) / 2) : 1,
 
-            ];
+                ];
 
-            $this->redis->hmset('jobs:stat:' . $this->getPresentation(), $stat);
+                $this->redis->hmset('jobs:stat:' . $this->getPresentation(), $stat);
+            }
 
         }
     }
