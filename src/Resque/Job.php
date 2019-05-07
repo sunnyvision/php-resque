@@ -86,6 +86,11 @@ class Job
     protected $instance;
 
     /**
+     * @var array subjects to mark state onto
+     */
+    protected $subjects = [];
+
+    /**
      * @var array of statuses that are considered final/complete
      */
     protected static $completeStatuses = array(
@@ -489,6 +494,8 @@ class Job
 
             $this->complete();
 
+            $this->cleanupSubject();
+
             echo "Job completed \n";
 
         } catch (Exception\Cancel $e) {
@@ -605,6 +612,38 @@ class Job
             $map['progress'] = 100;
         }
         return $map;
+    }
+
+    public function cleanupSubject()
+    {
+        if(empty($this->subjects)) {
+            return false;
+        }
+        $jobId = $this->getId();
+        foreach($this->subjects as $sub) {
+            $this->redis->zrem("jobsubject:pending:${sub}", $jobId);
+            $this->redis->zadd("jobsubject:done:${sub}", time(), $jobId);
+        }
+
+        return true;
+    }
+
+
+    public function setSubject($subjects)
+    {
+        if(is_string($subjects)) {
+            $subjects = [ $subjects ];
+        }
+
+        $this->subjects = array_merge($this->subjects, $subjects);
+
+        $jobId = $this->getId();
+
+        foreach($subjects as $sub) {
+            $this->redis->zadd("jobsubject:pending:${sub}", time(), $jobId);
+        }
+
+        return true;
     }
 
     /**
@@ -1169,6 +1208,7 @@ class Job
             'delayed'   => (float)$packet['delayed'],
             'started'   => (float)$packet['started'],
             'finished'  => (float)$packet['finished'],
+            'progress'  => (float)$packet['progress'],
             'output'    => $packet['output'],
             'exception' => $packet['exception']
         );

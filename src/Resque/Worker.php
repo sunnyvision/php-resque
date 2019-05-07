@@ -483,12 +483,13 @@ class Worker
                             $exitStatus = 255;
                         }
                         $this->log('Job '.$job.' exited with code '.$exitStatus, Logger::ERROR);
-                        $this->job->fail(new Exception\Dirty($exitStatus));
+                        $this->job->fail(new Exception\Dirty('Job '.$job.' exited with code '.$exitStatus));
                     }
                 } else {
                     if (($this->job->toArray()['worker'] === $this->getId()) && $this->job->getStatus() == Job::STATUS_RUNNING) {
                         $this->log('Job '.$job.' abnormally exited with code '.$exitStatus, Logger::ERROR);
-                        $this->job->fail(new Exception\Dirty($exitStatus));
+                        $this->job->fail(new Exception\Dirty('Job '.$job.' abnormally exited with code '.$exitStatus));
+                        $this->shutdown();
                     }
                 }
             } else {
