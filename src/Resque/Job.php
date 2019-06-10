@@ -623,6 +623,8 @@ class Job
         foreach($this->subjects as $sub) {
             $this->redis->zrem("jobsubject:pending:${sub}", $jobId);
             $this->redis->zadd("jobsubject:done:${sub}", time(), $jobId);
+            $this->redis->zremrangebyrank("jobsubject:done:${sub}", 0, -30);
+            $this->redis->expire("jobsubject:done:${sub}", 86400);
         }
 
         return true;
@@ -641,6 +643,7 @@ class Job
 
         foreach($subjects as $sub) {
             $this->redis->zadd("jobsubject:pending:${sub}", time(), $jobId);
+            $this->redis->expire("jobsubject:pending:${sub}", 86400 * 7);
         }
 
         return true;
