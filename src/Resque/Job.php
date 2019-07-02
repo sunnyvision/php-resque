@@ -321,7 +321,7 @@ class Job
             $instance = $this->getInstance();
             $unique = $instance->signature($this->getData());
             $unique = "unique:job:" . $unique;
-            if($this->redis->set($unique, $this->getId(), "NX", "EX", 86400 * 7) === 1) {
+            if($this->redis->set($unique, $this->getId(), "NX", "EX", 1800) === 1) {
                 // great, this is the only job
             } else {
                 // some same tag exist, check if the job is completed, if so rewrite it,
@@ -334,7 +334,7 @@ class Job
                     $this->redis->ltrim("duplicates", 0, 299);
                     return false;
                 } else {
-                    $this->redis->set($unique, $this->getId(), "EX", 86400 * 7);
+                    $this->redis->set($unique, $this->getId(), "EX", 1800);
                 }
             }
         }
@@ -623,7 +623,7 @@ class Job
         foreach($this->subjects as $sub) {
             $this->redis->zrem("jobsubject:pending:${sub}", $jobId);
             $this->redis->zadd("jobsubject:done:${sub}", time(), $jobId);
-            $this->redis->zremrangebyrank("jobsubject:done:${sub}", 0, -30);
+            $this->redis->zremrangebyrank("svq:jobsubject:done:${sub}", 0, -10);
             $this->redis->expire("jobsubject:done:${sub}", 86400);
         }
 
@@ -636,6 +636,8 @@ class Job
         if(is_string($subjects)) {
             $subjects = [ $subjects ];
         }
+
+        $subjects = array_filter($subjects);
 
         $this->subjects = array_merge($this->subjects, $subjects);
 
@@ -1212,6 +1214,7 @@ class Job
             'started'   => (float)$packet['started'],
             'finished'  => (float)$packet['finished'],
             'progress'  => (float)$packet['progress'],
+            'progress_l'  => (string)$packet['latest_line'],
             'output'    => $packet['output'],
             'exception' => $packet['exception']
         );
