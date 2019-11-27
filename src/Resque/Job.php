@@ -317,24 +317,33 @@ class Job
     public function ensureUniqueness() {
 
         if(method_exists($this->class, 'signature')) {
-
             $instance = $this->getInstance();
             $unique = $instance->signature($this->getData());
             $unique = "unique:job:" . $unique;
-            if($this->redis->set($unique, $this->getId(), "NX", "EX", 1800) === 1) {
+            $this->streamLog("This job requires mutex signature: " . $unique);
+            if($this->redis->set($unique, $this->getId(), "NX", "EX", 7200) === 1) {
+                $this->streamLog("Good. This is the first time");
                 // great, this is the only job
             } else {
                 // some same tag exist, check if the job is completed, if so rewrite it,
                 // otherwise do not queue.
                 $lastId = $this->redis->get($unique);
                 $job = \Resque::job($lastId);
-                if($lastId == $this->getId()) return true;
-                if($job &&  !in_array($job->getStatus(), self::$completeStatuses)) {
+                $this->streamLog("Existing job found (${lastId})");
+                if($lastId == $this->getId()) {
+                    // $this->streamLog("OK. This is the same job, allow continue");
+                    // return true;
+                }
+                $jobStatus = $job->getStatus();
+                $this->streamLog("Verifying the job status (" . $jobStatus . ")");
+                if($job &&  !in_array($jobStatus, self::$completeStatuses)) {
+                    $this->streamLog("NO-GO, Existing job found, but status is incomplete (" . $jobStatus . ")");
                     $this->redis->lpush("duplicates", $this->payload);
                     $this->redis->ltrim("duplicates", 0, 299);
                     return false;
                 } else {
-                    $this->redis->set($unique, $this->getId(), "EX", 1800);
+                    $this->streamLog("OK, Existing job found, but status is complete (" . $jobStatus . ")");
+                    $this->redis->set($unique, $this->getId(), "EX", 7200);
                 }
             }
         }
@@ -390,8 +399,9 @@ class Job
     public function streamLog($message, $setExpire = false)
     {
         if(empty($message)) return;
-        $this->redis->executeRaw(["xadd", $this->redis->addNamespace(self::redisKey($this, 'output')), 'maxlen', '~', 1000, '*', 'message', $message]);
+        $this->redis->executeRaw(["xadd", $this->redis->addNamespace(self::redisKey($this, 'output')), 'maxlen', '~', 1000, '*', 'message', $this->getWorker() . ": " . $message]);
         if($setExpire) $this->redis->executeRaw(["expire", $this->redis->addNamespace(self::redisKey($this, 'output')), 86400]);
+        error_log($this->getWorker() . ": " . $message);
     }
 
     /**
@@ -402,7 +412,8 @@ class Job
      **/
     public function jobErrorHandler($errno, $errstr, $errfile = NULL, $errline = NULL, $errcontent = NULL)   
     {
-        echo $errfile . ':' . $errline . ' .. ' . $errstr . PHP_EOL;
+        $this->streamLog("* (" . $this->friendlyErrorType($errno) . ") File: " . $errfile . ' Line:' . $errline);
+        $this->streamLog("* " . $errstr);
         return false;
     }
 
@@ -415,9 +426,47 @@ class Job
     public function jobFatalErrorHandler()   
     {
       $last_error = error_get_last();
+      $this->streamLog("*** FATAL ERROR ***");
       $this->jobErrorHandler(E_ERROR, $last_error['message'], $last_error['file'], $last_error['line']);
     }
 
+    public function friendlyErrorType($type)
+    {
+        switch($type)
+        {
+            case E_ERROR: // 1 //
+                return 'E_ERROR';
+            case E_WARNING: // 2 //
+                return 'E_WARNING';
+            case E_PARSE: // 4 //
+                return 'E_PARSE';
+            case E_NOTICE: // 8 //
+                return 'E_NOTICE';
+            case E_CORE_ERROR: // 16 //
+                return 'E_CORE_ERROR';
+            case E_CORE_WARNING: // 32 //
+                return 'E_CORE_WARNING';
+            case E_COMPILE_ERROR: // 64 //
+                return 'E_COMPILE_ERROR';
+            case E_COMPILE_WARNING: // 128 //
+                return 'E_COMPILE_WARNING';
+            case E_USER_ERROR: // 256 //
+                return 'E_USER_ERROR';
+            case E_USER_WARNING: // 512 //
+                return 'E_USER_WARNING';
+            case E_USER_NOTICE: // 1024 //
+                return 'E_USER_NOTICE';
+            case E_STRICT: // 2048 //
+                return 'E_STRICT';
+            case E_RECOVERABLE_ERROR: // 4096 //
+                return 'E_RECOVERABLE_ERROR';
+            case E_DEPRECATED: // 8192 //
+                return 'E_DEPRECATED';
+            case E_USER_DEPRECATED: // 16384 //
+                return 'E_USER_DEPRECATED';
+        }
+        return "";
+    }
 
     /**
      * Perform the job
@@ -431,7 +480,13 @@ class Job
 
         set_error_handler(array($this, 'jobErrorHandler'));
         register_shutdown_function(array($this, 'jobFatalErrorHandler'));
-        $this->streamLog('begin', true);
+
+        if(!$this->ensureUniqueness()) {
+            throw new Exception\Cancel("Uniqueness cannot be enforced.", 1);
+            
+        }
+
+        $this->streamLog('Job begins on ' . (string) $this->getWorker(), true);
 
         $packet = $this->getPacket();
         $overrideCancel = (
@@ -441,7 +496,7 @@ class Job
 
 
         if($overrideCancel) {
-            $this->streamLog('remote cancelled');
+            $this->streamLog('Remote cancelled');
             $this->cancel(new \Exception("Cancelled due to {$packet['override_reason']}"));
             return false;
         }
@@ -470,12 +525,12 @@ class Job
                 $this->redis->executeRaw(["xadd", "bot-output", 'maxlen', '~', 50000, '*', 
                     'worker', $this->getWorker()->getId(),
                     'message', $buffer]);
-                $this->streamLog($buffer);
+                $this->streamLog("\n" . $buffer);
                 if($channel) $this->redis->publish("bot-channel-" . $channel, $buffer);
             });
 
             ob_start(function($buffer, $phase) use ($channel) {
-                $this->streamLog($buffer);
+                $this->streamLog("\n" . $buffer);
                 if($channel) $this->redis->publish("bot-channel-" . $channel, $buffer);
                 return $buffer;
             }, 1024);
@@ -498,6 +553,7 @@ class Job
 
             echo "Job completed \n";
 
+
         } catch (Exception\Cancel $e) {
             // setUp said don't perform this job
             $log = "[Job cancel] [{$this->getId()}] " . $e->getMessage();
@@ -516,7 +572,7 @@ class Job
             }
             $this->fail($e, $e->getMessage(), true);
             $retval = false;
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $log = "[Job exception] [{$this->getId()}] " . $e->getMessage();
             echo "{$log} \n";
             $this->worker && $this->worker->log($log, Logger::NOTICE);
@@ -758,8 +814,9 @@ class Job
      *
      * @param \Exception $e
      */
-    public function fail(\Exception $e, $output = null, $mustRequeue = false)
+    public function fail(\Throwable $e, $output = null, $mustRequeue = false)
     {
+
         $this->stopped();
 
         if($output != null) {
@@ -806,6 +863,8 @@ class Job
     }
 
     $remoteCancelled = (isset($packet['override_status']) && $packet['override_status'] == Job::STATUS_CANCELLED);
+
+    var_dump($shouldRequeue);
 
     if(!$remoteCancelled && ($shouldRequeue || $mustRequeue)) {
         if($this->worker) {
@@ -914,7 +973,7 @@ class Job
      * @param int        $status The status of the job
      * @param \Exception $e      If failed status it sends through exception
      */
-    public function setStatus($status, \Exception $e = null)
+    public function setStatus($status, \Throwable $e = null)
     {
         if (!($packet = $this->getPacket())) {
             $shifts = debug_backtrace();
@@ -962,11 +1021,18 @@ class Job
         }
 
         if ($e) {
-            $packet['exception'] = json_encode(array(
+            if($packet['exception']) {
+                $exceptionPacket = json_decode($packet['exception'], true);
+            } else {
+                $exceptionPacket = [];
+            }
+            $exceptionPacket[] = array(
+                'attempt' => $packet['failed_count'] + 1,
                 'class'     => get_class($e),
                 'error'     => sprintf('%s in %s on line %d', $e->getMessage(), $e->getFile(), $e->getLine()),
                 'backtrace' => explode("\n", $e->getTraceAsString())
-            ));
+            );
+            $packet['exception'] = json_encode($exceptionPacket);
         }
 
         $this->redis->hmset(self::redisKey($this), $packet);

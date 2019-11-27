@@ -221,11 +221,21 @@ class Worker
 
         $this->host = new Host();
         $this->pid  = getmypid();
-        $this->id   = $this->host.':'.$this->pid;
+        $this->id   = $this->host. ':' . $this->pid . ':' . phpversion();
         $this->dedicatedLock = false;
 
         Event::fire(Event::WORKER_INSTANCE, $this);
     }
+
+    public static function setMaintenance() {
+        return(Redis::instance())->hset("global",  "dedicated", "maintenance");
+    }
+
+    public static function removeDedicated() {
+        (Redis::instance())->hset("global",  "cluster", uniqid());
+        return (Redis::instance())->hdel("global",  "dedicated");
+    }
+
 
     /**
      * Set worker to dedicated mode
@@ -284,27 +294,27 @@ class Worker
                 case "FORCESHUTDOWN":
                 case "SIGTERM":
                 case "SIGINT":
-                    posix_kill(getmypid(), SIGKILL);
+                posix_kill(getmypid(), SIGKILL);
                 break;
                 case "QUIT":
                 case "SHUTDOWN":
                 case "SIGQUIT":
-                    posix_kill(getmypid(), SIGQUIT);
+                posix_kill(getmypid(), SIGQUIT);
                 break;
                 case "CANCEL":
                 case "SIGUSR1": 
-                    posix_kill(getmypid(), SIGUSR1);
+                posix_kill(getmypid(), SIGUSR1);
                 break;
                 case "PAUSE":
                 case "SIGUSR2":
-                    posix_kill(getmypid(), SIGUSR2);
+                posix_kill(getmypid(), SIGUSR2);
                 break;
                 case "RESUME":
                 case "SIGCONT":
-                    posix_kill(getmypid(), SIGCONT);
+                posix_kill(getmypid(), SIGCONT);
                 break;
                 case "SIGPIPE":
-                    posix_kill(getmypid(), SIGPIPE);
+                posix_kill(getmypid(), SIGPIPE);
                 break;
                 default:
                 $this->log('Unhandled <pop>'.$signalData.'</pop>', Logger::INFO);
@@ -542,7 +552,8 @@ class Worker
         // and turn off displaying errors as it fills
         // up the console
         set_time_limit($this->timeout);
-        ini_set('display_errors', 1);
+        ini_set('display_errors', 0);
+        ob_implicit_flush(true);
 
         $job->isPerformedOnBot = true;
 
@@ -552,25 +563,27 @@ class Worker
 
         switch ($status) {
             case Job::STATUS_COMPLETE:
-                $this->log('Done job <pop>'.$job.'</pop> in <pop>'.$job->execTimeStr().'</pop>', Logger::INFO);
-                break;
+            $this->log('Done job <pop>'.$job.'</pop> in <pop>'.$job->execTimeStr().'</pop>', Logger::INFO);
+            break;
             case Job::STATUS_CANCELLED:
-                $this->log('Cancelled job <pop>'.$job.'</pop>', Logger::INFO);
-                break;
+            $this->log('Cancelled job <pop>'.$job.'</pop>', Logger::INFO);
+            break;
 
             case Job::STATUS_FAILED:
-                $this->log('Job '.$job.' failed: "'.$job->failError().'" in '.$job->execTimeStr(), Logger::ERROR);
-                break;
+            $this->log('Job '.$job.' failed: "'.$job->failError().'" in '.$job->execTimeStr(), Logger::ERROR);
+            break;
             case Job::STATUS_WAITING:
-                $this->log('Job '.$job.' requeued explicitly.', Logger::INFO);
-                break;
+            $this->log('Job '.$job.' requeued explicitly.', Logger::INFO);
+            break;
             case Job::STATUS_DELAYED:
-                $this->log('Job '.$job.' requeued with delay.', Logger::INFO);
-                break;
+            $this->log('Job '.$job.' requeued with delay.', Logger::INFO);
+            break;
             default:
-                $this->log('Unknown job status "('.gettype($status).')'.$status.'" for <pop>'.$job.'</pop>', Logger::WARNING);
-                break;
+            $this->log('Unknown job status "('.gettype($status).')'.$status.'" for <pop>'.$job.'</pop>', Logger::WARNING);
+            break;
         }
+
+        return $status;
     }
 
     /**
@@ -791,14 +804,14 @@ class Worker
     {
         switch ($sig) {
             case SIGTERM:
-                $sig = 'TERM';
-                break;
+            $sig = 'TERM';
+            break;
             case SIGINT:
-                $sig = 'INT';
-                break;
+            $sig = 'INT';
+            break;
             default:
-                $sig = 'Unknown';
-                break;
+            $sig = 'Unknown';
+            break;
         }
 
         $this->log($sig.' received; force shutdown worker', Logger::INFO);
@@ -897,18 +910,18 @@ class Worker
 
         switch ($this->job->getStatus()) {
             case Job::STATUS_COMPLETE:
-                $this->redis->hincrby(self::redisKey($this), 'processed', 1);
-                break;
+            $this->redis->hincrby(self::redisKey($this), 'processed', 1);
+            break;
             case Job::STATUS_CANCELLED:
-                $this->redis->hincrby(self::redisKey($this), 'cancelled', 1);
-                break;
+            $this->redis->hincrby(self::redisKey($this), 'cancelled', 1);
+            break;
             case Job::STATUS_FAILED:
-                $this->redis->hincrby(self::redisKey($this), 'failed', 1);
-                break;
+            $this->redis->hincrby(self::redisKey($this), 'failed', 1);
+            break;
             case Job::STATUS_WAITING:
             case Job::STATUS_DELAYED:
-                $this->redis->hincrby(self::redisKey($this), 'retried', 1);
-                break;
+            $this->redis->hincrby(self::redisKey($this), 'retried', 1);
+            break;
         }
 
         $this->job = null;
@@ -949,16 +962,16 @@ class Worker
 
         switch ($status) {
             case self::STATUS_NEW:
-                break;
+            break;
             case self::STATUS_RUNNING:
-                if ($oldstatus != self::STATUS_NEW) {
-                    Event::fire(Event::WORKER_RESUME, $this);
-                }
+            if ($oldstatus != self::STATUS_NEW) {
+                Event::fire(Event::WORKER_RESUME, $this);
+            }
 
-                break;
+            break;
             case self::STATUS_PAUSED:
-                Event::fire(Event::WORKER_PAUSE, $this);
-                break;
+            Event::fire(Event::WORKER_PAUSE, $this);
+            break;
         }
     }
 
@@ -1621,5 +1634,53 @@ class Worker
     public function getCapabilities()
     {
         return $this->capabilities;
+    }
+
+
+    public static function friendlyStatus($status) {
+        switch($status) {
+            case self::STATUS_NEW:
+            return "NEW";
+
+            case self::STATUS_RUNNING:
+            return "RUNNING";
+
+            case self::STATUS_PAUSED:
+            return "PAUSED";
+
+        }
+    }
+
+    public static function dumpWorker($asText = true) {
+
+        $buffer = new \Symfony\Component\Console\Output\BufferedOutput();
+        $table = new \Symfony\Component\Console\Helper\Table($buffer);
+
+        $return = [];
+
+        foreach(self::allWorkers() as $worker) {
+            $return[] = array_merge($worker->getPacket(), ['id' => $worker->getId()]);
+        }
+
+        $table->setHeaders([
+            'Worker Id (Total: ' . count($return) . ')','Queues','Status','Job PID','Job Last Started', "Capabilities"
+        ])
+        ->setRows(array_map(function($d) {
+            return [
+                $d['id'],
+                $d['queues'],
+                self::friendlyStatus($d['status']) . ' (' . $d['status'] . ')',
+                $d['job_pid'],
+                empty($d['job_started']) ? "---" : date("Y-m-d H:i:s", $d['job_started']),
+                implode(" & ", $d['capabilities'])
+            ];
+        }, $return));
+
+        $table->render();
+
+        if($asText)
+            return $buffer->fetch();
+
+        return $return;
     }
 }
