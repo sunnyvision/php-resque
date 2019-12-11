@@ -329,10 +329,14 @@ class Job
                 // otherwise do not queue.
                 $lastId = $this->redis->get($unique);
                 $job = \Resque::job($lastId);
-                $this->streamLog("Existing job found (${lastId})");
+                if(!$job) {
+                    $this->redis->set($unique, $this->getId(), "EX", 7200);
+                    return true;
+                }
+                $this->streamLog("Existing job found (${lastId}), me: " . $this->getId());
                 if($lastId == $this->getId()) {
-                    // $this->streamLog("OK. This is the same job, allow continue");
-                    // return true;
+                    $this->streamLog("OK. This is the same job, allow continue");
+                    return true;
                 }
                 $jobStatus = $job->getStatus();
                 $this->streamLog("Verifying the job status (" . $jobStatus . ")");
@@ -425,9 +429,15 @@ class Job
      **/
     public function jobFatalErrorHandler()   
     {
-      $last_error = error_get_last();
-      $this->streamLog("*** FATAL ERROR ***");
-      $this->jobErrorHandler(E_ERROR, $last_error['message'], $last_error['file'], $last_error['line']);
+        $last_error = error_get_last();
+        if(!empty($last_error)) {
+            if($last_error['type'] === E_ERROR) {
+                $this->streamLog("*** FATAL ERROR ***");
+                $this->jobErrorHandler($last_error['type'], $last_error['message'], $last_error['file'], $last_error['line']);
+            }
+        } else {
+            $this->streamLog("*** GRACEFUL SHUTDOWN ***");  
+        }
     }
 
     public function friendlyErrorType($type)
