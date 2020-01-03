@@ -282,7 +282,7 @@ class Job
             return false;
         }
 
-        if($validate && !$this->ensureUniqueness()) return false;
+        if($validate && !$this->ensureUniqueness(false)) return false;
 
         if($currentStatus != self::STATUS_DELAYED) {
             $this->redis->hdel(self::redisKey($this), ['override_status']);
@@ -314,15 +314,15 @@ class Job
         return true;
     }
 
-    public function ensureUniqueness() {
+    public function ensureUniqueness($log = true) {
 
         if(method_exists($this->class, 'signature')) {
             $instance = $this->getInstance();
             $unique = $instance->signature($this->getData());
             $unique = "unique:job:" . $unique;
-            $this->streamLog("This job requires mutex signature: " . $unique);
+            if($log) $this->streamLog("This job requires mutex signature: " . $unique);
             if($this->redis->set($unique, $this->getId(), "NX", "EX", 7200) === 1) {
-                $this->streamLog("Good. This is the first time");
+                if($log) $this->streamLog("Good. This is the first time");
                 // great, this is the only job
             } else {
                 // some same tag exist, check if the job is completed, if so rewrite it,
@@ -333,20 +333,20 @@ class Job
                     $this->redis->set($unique, $this->getId(), "EX", 7200);
                     return true;
                 }
-                $this->streamLog("Existing job found (${lastId}), me: " . $this->getId());
+                if($log) $this->streamLog("Existing job found (${lastId}), me: " . $this->getId());
                 if($lastId == $this->getId()) {
                     $this->streamLog("OK. This is the same job, allow continue");
                     return true;
                 }
                 $jobStatus = $job->getStatus();
-                $this->streamLog("Verifying the job status (" . $jobStatus . ")");
+                if($log) $this->streamLog("Verifying the job status (" . $jobStatus . ")");
                 if($job &&  !in_array($jobStatus, self::$completeStatuses)) {
-                    $this->streamLog("NO-GO, Existing job found, but status is incomplete (" . $jobStatus . ")");
+                    if($log) $this->streamLog("NO-GO, Existing job found, but status is incomplete (" . $jobStatus . ")", true);
                     $this->redis->lpush("duplicates", $this->payload);
                     $this->redis->ltrim("duplicates", 0, 299);
                     return false;
                 } else {
-                    $this->streamLog("OK, Existing job found, but status is complete (" . $jobStatus . ")");
+                    if($log) $this->streamLog("OK, Existing job found, but status is complete (" . $jobStatus . ")");
                     $this->redis->set($unique, $this->getId(), "EX", 7200);
                 }
             }
@@ -366,7 +366,7 @@ class Job
             return false;
         }
 
-        if(!$this->ensureUniqueness()) return false;
+        if(!$this->ensureUniqueness(false)) return false;
 
         if(method_exists($this->class, 'onQueue')) {
             $instance = $this->getInstance();
@@ -400,9 +400,13 @@ class Job
      * @return void
      * @author 
      **/
-    public function streamLog($message, $setExpire = false)
+    public function streamLog($message, $setExpire = false, $del = false)
     {
         if(empty($message)) return;
+        if($del) {
+            $this->redis->executeRaw(["del", $this->redis->addNamespace(self::redisKey($this, 'output'))]);
+            return;
+        }
         $this->redis->executeRaw(["xadd", $this->redis->addNamespace(self::redisKey($this, 'output')), 'maxlen', '~', 1000, '*', 'message', $this->getWorker() . ": " . $message]);
         if($setExpire) $this->redis->executeRaw(["expire", $this->redis->addNamespace(self::redisKey($this, 'output')), 86400]);
         error_log($this->getWorker() . ": " . $message);
@@ -584,6 +588,7 @@ class Job
             $retval = false;
         } catch (\Throwable $e) {
             $log = "[Job exception] [{$this->getId()}] " . $e->getMessage();
+            $log .= $e->getTraceAsString();
             echo "{$log} \n";
             $this->worker && $this->worker->log($log, Logger::NOTICE);
             $this->fail($e);
@@ -874,8 +879,6 @@ class Job
 
     $remoteCancelled = (isset($packet['override_status']) && $packet['override_status'] == Job::STATUS_CANCELLED);
 
-    var_dump($shouldRequeue);
-
     if(!$remoteCancelled && ($shouldRequeue || $mustRequeue)) {
         if($this->worker) {
             if($e instanceof Exception\Retry) {
@@ -952,7 +955,7 @@ class Job
             $packet['status'] !== Job::STATUS_FAILED and
             ($e = json_decode($packet['exception'], true))
         ) {
-            return $e['error'];
+            return empty($e['error']) ? var_export($e, true) : $e['error'];
         }
 
         return 'Unknown exception';
@@ -1030,11 +1033,19 @@ class Job
             if($status == Job::STATUS_COMPLETE) $packet['progress'] = 100;
         }
 
-        if ($e) {
+        if ($e && (!$e instanceof \Core\Job\RetryException)) {
             if($packet['exception']) {
                 $exceptionPacket = json_decode($packet['exception'], true);
             } else {
                 $exceptionPacket = [];
+            }
+
+            if(count($exceptionPacket) > 5) {
+                array_splice($exceptionPacket, 0, count($exceptionPacket) - 5);
+            } 
+
+            if(empty($packet['failed_count'])) {
+                $packet['failed_count'] = 0;
             }
             $exceptionPacket[] = array(
                 'attempt' => $packet['failed_count'] + 1,

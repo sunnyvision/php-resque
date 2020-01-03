@@ -488,13 +488,16 @@ class Worker
                 if (!pcntl_wifexited($status) or ($exitStatus = pcntl_wexitstatus($status)) !== 0) {
                     if ($this->job->getStatus() == Job::STATUS_FAILED) {
                         $this->log('Job '.$job.' failed: "'.$job->failError().'" in '.$this->job->execTimeStr(), Logger::ERROR);
+                        $this->shutdown();
                     } else {
                         if(empty($exitStatus)) {
                             $exitStatus = 255;
                         }
                         $this->log('Job '.$job.' exited with code '.$exitStatus, Logger::ERROR);
                         $this->job->fail(new Exception\Dirty('Job '.$job.' exited with code '.$exitStatus));
+                        $this->shutdown();
                     }
+
                 } else {
                     if (($this->job->toArray()['worker'] === $this->getId()) && $this->job->getStatus() == Job::STATUS_RUNNING) {
                         $this->log('Job '.$job.' abnormally exited with code '.$exitStatus, Logger::ERROR);
