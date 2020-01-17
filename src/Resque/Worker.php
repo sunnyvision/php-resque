@@ -472,16 +472,20 @@ class Worker
                 }
                 $t = microtime(true);
                 while(pcntl_wait($status, WNOHANG) === 0) {
-                    usleep(1000);
-                    if( (microtime(true) - $t) > 5) {
+                    usleep(5000);
+                    $elapsed = microtime(true) - $t;
+                    if( ($elapsed) > 5) {
                         $t = microtime(true);
-                        $this->handleRemoteSignal();
+                        if((time() - $time) > 3600) {
+                            $this->log('Expired job, running too long (>1hr)', Logger::DEBUG);
+                            break;
+                        }
                         if($pid > 0) {
                             $this->redis->hset(self::redisKey($this), 'job_load', str_replace("\n", "", trim(shell_exec ( "ps -p " . $pid . " -o %cpu,%mem | tail -n +2" ))));
                         }
 
                         $this->host->working($this);
-                        $this->log('(' . $status . ') [' . $this->getId() . '] Host keep alive and child still up (' . (time() - $time) . 's)', Logger::DEBUG);
+                        $this->log('(' . $status . ') [' . $this->getId() . '] Host keep alive and child (' . $this->child . ') still up (' . (time() - $time) . 's)', Logger::DEBUG);
                     }
                 }
 
@@ -535,6 +539,7 @@ class Worker
                         $this->redis->exec();
                     }
                 }
+                $job->setLogger($this->getLogger());
                 $this->perform($job);
                 exit(0);
             }

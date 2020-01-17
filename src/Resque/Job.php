@@ -90,6 +90,8 @@ class Job
      */
     protected $subjects = [];
 
+    protected $logger = null;
+
     /**
      * @var array of statuses that are considered final/complete
      */
@@ -395,6 +397,41 @@ class Job
     }
 
     /**
+     * Get the logger instance
+     *
+     * @return Logger
+     */
+    public function getLogger()
+    {
+        return $this->logger;
+    }
+
+    /**
+     * Set the logger instance
+     *
+     * @param Logger $logger The logger for this worker
+     */
+    public function setLogger(Logger $logger = null)
+    {
+        $this->logger = $logger;
+    }
+
+    /**
+     * Helper function that passes through to logger instance
+     *
+     * @see    Logger::log For more documentation
+     * @return mixed
+     */
+    public function log()
+    {
+        if ($this->logger !== null) {
+            return call_user_func_array(array($this->logger, 'log'), func_get_args());
+        }
+
+        return false;
+    }
+
+    /**
      * Stream logs
      *
      * @return void
@@ -409,7 +446,7 @@ class Job
         }
         $this->redis->executeRaw(["xadd", $this->redis->addNamespace(self::redisKey($this, 'output')), 'maxlen', '~', 1000, '*', 'message', $this->getWorker() . ": " . $message]);
         if($setExpire) $this->redis->executeRaw(["expire", $this->redis->addNamespace(self::redisKey($this, 'output')), 86400]);
-        error_log($this->getWorker() . ": " . $message);
+        $this->log($this->getWorker() . ": " . $message);
     }
 
     /**
@@ -422,6 +459,7 @@ class Job
     {
         $this->streamLog("* (" . $this->friendlyErrorType($errno) . ") File: " . $errfile . ' Line:' . $errline);
         $this->streamLog("* " . $errstr);
+        $this->worker && $this->worker->log($errstr, Logger::CRITICAL);
         return false;
     }
 
@@ -549,13 +587,16 @@ class Job
                 return $buffer;
             }, 1024);
 
-            echo "Job started \n";
+            $this->streamLog("Job started");
 
             if (method_exists($instance, 'setUp')) {
                 $instance->setUp($this->data);
             }
 
             call_user_func_array(array($instance, $this->method), array($this->data, $this));
+
+            flush();
+            ob_flush();
 
             if (method_exists($instance, 'tearDown')) {
                 $instance->tearDown();
@@ -565,22 +606,22 @@ class Job
 
             $this->cleanupSubject();
 
-            echo "Job completed \n";
+            $this->streamLog("Job completed");
 
 
         } catch (Exception\Cancel $e) {
             // setUp said don't perform this job
             $log = "[Job cancel] [{$this->getId()}] " . $e->getMessage();
-            echo "{$log} \n";
-            $this->worker && $this->worker->log($log, Logger::NOTICE);
+            $this->streamLog($log);
+            $this->log($log, Logger::CRITICAL);
             $this->cancel($e);
             echo $e->getMessage();
             $retval = false;
         } catch (Exception\Retry $e) {
             // retry this job again
             $log = "[Job retry] [{$this->getId()}] " . $e->getMessage();
-            echo "{$log} \n";
-            $this->worker && $this->worker->log($log, Logger::NOTICE);
+            $this->streamLog($log);
+            $this->log($log, Logger::CRITICAL);
             if(!empty($e->queue)) {
                 $this->queue = $e->queue;
             }
@@ -589,8 +630,8 @@ class Job
         } catch (\Throwable $e) {
             $log = "[Job exception] [{$this->getId()}] " . $e->getMessage();
             $log .= $e->getTraceAsString();
-            echo "{$log} \n";
-            $this->worker && $this->worker->log($log, Logger::NOTICE);
+            $this->streamLog($log);
+            $this->log($log, Logger::CRITICAL);
             $this->fail($e);
             $retval = false;
         }
