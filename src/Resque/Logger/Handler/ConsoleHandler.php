@@ -90,7 +90,7 @@ class ConsoleHandler extends AbstractProcessingHandler
     /**
      * {@inheritdoc}
      */
-    public function isHandling(array $record)
+    public function isHandling(array $record): bool
     {
         return $this->updateLevel() and parent::isHandling($record);
     }
@@ -98,7 +98,7 @@ class ConsoleHandler extends AbstractProcessingHandler
     /**
      * {@inheritdoc}
      */
-    public function handle(array $record)
+    public function handle(array $record): bool
     {
         // we have to update the logging level each time because the verbosity of the
         // console output might have changed in the meantime (it is not immutable)
@@ -108,14 +108,14 @@ class ConsoleHandler extends AbstractProcessingHandler
     /**
      * {@inheritdoc}
      */
-    protected function write(array $record)
+    protected function write(array $record): void
     {
         if (
             null === $this->output or
             OutputInterface::VERBOSITY_QUIET === ($verbosity = $this->output->getVerbosity()) or
             $verbosity < $this->verbosityLevelMap[$record['level']]
         ) {
-            return false;
+            return;
         }
 
         if ($record['level'] >= Logger::ERROR and $this->output instanceof ConsoleOutputInterface) {
@@ -128,7 +128,7 @@ class ConsoleHandler extends AbstractProcessingHandler
     /**
      * {@inheritdoc}
      */
-    protected function getDefaultFormatter()
+    protected function getDefaultFormatter(): \Monolog\Formatter\FormatterInterface
     {
         $formatter = new Logger\Formatter\ConsoleFormatter;
         if (method_exists($formatter, 'allowInlineLineBreaks')) {
