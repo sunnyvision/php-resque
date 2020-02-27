@@ -1032,6 +1032,9 @@ class Job
         if (!($packet = $this->getPacket())) {
             $shifts = debug_backtrace();
             while($item = array_shift($shifts)) {
+                if(empty($item['file'])) {
+                    $item['file'] = '';
+                }
                 if(stripos($item['file'], 'Foundation/Retry') !== false && $item['function'] === '_exec') break;
             }
             array_splice($shifts, 3);
@@ -1328,6 +1331,13 @@ class Job
     public function toArray()
     {
         $packet = $this->getPacket();
+
+        if(empty($packet['latest_line'])) {
+            $packet['latest_line'] = '';
+        }
+        if(empty($packet['progress'])) {
+            $packet['progress'] = 0;
+        }
 
         return array(
             'id'        => (string)$this->id,
